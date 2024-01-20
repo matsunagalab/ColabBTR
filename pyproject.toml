@@ -1,0 +1,12 @@
+[project]
+name = "colabbtr"
+version = "0.0.1"
+description = """End-to-end differentiable blind tip reconstruction on Colab implemented with PyTorch"""
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{name = "Yasuhiro Matsunaga", email = "ymatsunaga@mail.saitama-u.ac.jp"}]
+
+dependencies = [
+    "torch",
+    "tqdm",
+]
