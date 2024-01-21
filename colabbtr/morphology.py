@@ -3,13 +3,30 @@ from torch.utils.data import Dataset, DataLoader, TensorDataset
 import torch.optim as optim
 from tqdm.notebook import tqdm
 
+#     Please write docstring here to explain what this function does
+#     and what are the inputs and outputs
 def compute_xc_yc(tip):
+    """
+    Compute the center position of the tip
+        Input: tip (tensor of size (tip_height, tip_width)
+        Output: xc, yc (int)
+    """
     tip_xsiz, tip_ysiz = tip.size()
     xc = round((tip_xsiz - 1) / 2)
     yc = round((tip_ysiz - 1) / 2)
     return xc, yc
 
+#     Please write docstring here to explain what this function does
+#     and what are the inputs and outputs
 def idilation(surface, tip):
+    """
+    Compute the dilation of surface by tip
+        Input: surface (tensor of size (surface_height, surface_width)
+               tip (tensor of size (tip_height, tip_width)
+        Output: r (tensor of size (image_height, image_width)
+                where image_heigh is equal to surface_height
+                      image_width is equal to surface_width
+    """
     xc, yc = compute_xc_yc(tip)
     tip_xsiz, tip_ysiz = tip.size()
 
@@ -22,6 +39,12 @@ def idilation(surface, tip):
     return r
 
 def ierosion(image, tip):
+    """
+    Compute the erosion of image by tip
+        Input: image (tensor of size (image_height, image_width)
+               tip (tensor of size (tip_height, tip_width)
+        Output: r (tensor of size (image_height, image_width)
+    """
     xc, yc = compute_xc_yc(tip)
     tip_xsiz, tip_ysiz = tip.size()
 
@@ -34,6 +57,11 @@ def ierosion(image, tip):
     return r
 
 def translate_tip_mean(P, cutoff=10**(-8)):
+    """
+    Translate the tip to the center of mass
+        Input: P (tensor of size (tip_height, tip_width))
+        Output: P_new (tensor of size (tip_height, tip_width)
+    """
     tip_xsiz, tip_ysiz = P.size()
     xc, yc = compute_xc_yc(P)
 
@@ -70,6 +98,16 @@ def translate_tip_mean(P, cutoff=10**(-8)):
     return P_new
 
 def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, device='cpu'):
+    """
+    Reconstruct tip shape from given AFM images by differentiable blind tip reconstruction (BTR)
+        Input: images (tensor of size (nframe, image_height, image_width)
+               tip_size (2d tuple)
+               nepoch (int)
+               lr (float) for AdamW
+               weight_decay (float) for AdamW
+               device (str) ''cpu'' or ''cuda''
+        Output: tip_estimate (tensor of tip_size), loss_train (list)
+    """
     # Initialize tip with zeros
     tip = torch.zeros(tip_size, dtype=torch.float64, requires_grad=True, device=device)
 
@@ -100,7 +138,11 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, d
 
 def surfing(xyz, radius, config):
     """
-    compute the maximum height (z-value) of molecular surface at grid points on AFM stage (where z=0)
+    Compute the maximum height (z-value) of molecular surface at grid points on AFM stage (where z=0)
+        Input: xyz (tensor of size (N, 3))
+                radius (tensor of size (N,))
+                config (dict)
+        Output: z_stage (tensor of size (len(y_stage), len(x_stage))
     """
     radius2 = radius**2
     x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"]) + 0.5*config["resolution_x"]
