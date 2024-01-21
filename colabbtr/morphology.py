@@ -97,7 +97,7 @@ def translate_tip_mean(P, cutoff=10**(-8)):
 
     return P_new
 
-def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, device='cpu'):
+def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0):
     """
     Reconstruct tip shape from given AFM images by differentiable blind tip reconstruction (BTR)
         Input: images (tensor of size (nframe, image_height, image_width)
@@ -105,10 +105,10 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, d
                nepoch (int)
                lr (float) for AdamW
                weight_decay (float) for AdamW
-               device (str) ''cpu'' or ''cuda''
         Output: tip_estimate (tensor of tip_size), loss_train (list)
     """
     # Initialize tip with zeros
+    device = images.device
     tip = torch.zeros(tip_size, dtype=torch.float64, requires_grad=True, device=device)
 
     # Optimization settings
