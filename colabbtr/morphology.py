@@ -3,12 +3,10 @@ from torch.utils.data import Dataset, DataLoader, TensorDataset
 import torch.optim as optim
 from tqdm.notebook import tqdm
 
-#     Please write docstring here to explain what this function does
-#     and what are the inputs and outputs
 def compute_xc_yc(tip):
     """
     Compute the center position of the tip
-        Input: tip (tensor of size (tip_height, tip_width)
+        Input: tip (tensor of size (tip_height, tip_width))
         Output: xc, yc (int)
     """
     tip_xsiz, tip_ysiz = tip.size()
