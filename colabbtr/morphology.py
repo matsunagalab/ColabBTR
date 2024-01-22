@@ -14,8 +14,6 @@ def compute_xc_yc(tip):
     yc = round((tip_ysiz - 1) / 2)
     return xc, yc
 
-#     Please write docstring here to explain what this function does
-#     and what are the inputs and outputs
 def idilation(surface, tip):
     """
     Compute the dilation of surface by tip
