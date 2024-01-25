@@ -143,7 +143,8 @@ def surfing(xyz, radius, config):
     radius2 = radius**2
     x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"]) + 0.5*config["resolution_x"]
     y_stage = torch.arange(config["min_y"], config["max_y"], config["resolution_y"]) + 0.5*config["resolution_y"]
-    z_stage = torch.full((len(y_stage), len(x_stage)), xyz[:, 2].min())
+    #z_stage = torch.full((len(y_stage), len(x_stage)), xyz[:, 2].min())
+    z_stage = torch.full((len(y_stage), len(x_stage)), 0.0, dtype=torch.float32)
     for i in range(len(x_stage)):
         for j in range(len(y_stage)):
             x = x_stage[i]
