@@ -140,11 +140,12 @@ def surfing(xyz, radius, config):
                 config (dict)
         Output: z_stage (tensor of size (len(y_stage), len(x_stage))
     """
+    device = xyz.device
     radius2 = radius**2
     x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"]) + 0.5*config["resolution_x"]
     y_stage = torch.arange(config["min_y"], config["max_y"], config["resolution_y"]) + 0.5*config["resolution_y"]
     #z_stage = torch.full((len(y_stage), len(x_stage)), xyz[:, 2].min())
-    z_stage = torch.full((len(y_stage), len(x_stage)), 0.0, dtype=torch.float32)
+    z_stage = torch.full((len(y_stage), len(x_stage)), 0.0, dtype=torch.float32, device=device)
     for i in range(len(x_stage)):
         for j in range(len(y_stage)):
             x = x_stage[i]
@@ -157,6 +158,19 @@ def surfing(xyz, radius, config):
             if any(index_within_radius):
                 z_stage[-j-1, i] = torch.max(xyz[index_within_radius, 2] + torch.sqrt(radius2[index_within_radius] - r2[index_within_radius]))
     return z_stage
+
+def afmize(xyz, tip, radius, config):
+    """
+    Compute AFM image from xyz coordinates and atomic radii
+        Input: xyz (tensor of size (N, 3))
+                tip (tensor of size (tip_height, tip_width))
+                radius (tensor of size (N,))
+                config (dict)
+        Output: image (tensor of size (len(y_stage), len(x_stage))
+    """
+    surface = surfing(xyz, radius, config)
+    image = idilation(surface, tip)
+    return image
 
 # mapping atom name to radius in Angstrom
 Atom2Radius = {
