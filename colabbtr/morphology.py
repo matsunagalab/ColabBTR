@@ -147,12 +147,14 @@ def surfing(xyz, radius, config):
     #z_stage = torch.full((len(y_stage), len(x_stage)), xyz[:, 2].min())
     z_stage = torch.full((len(y_stage), len(x_stage)), 0.0, dtype=torch.float32, device=device)
     for i in range(len(x_stage)):
+        x = x_stage[i]
+        dx = xyz[:, 0] - x
+        dx2 = dx**2
         for j in range(len(y_stage)):
-            x = x_stage[i]
             y = y_stage[j]
-            dx = xyz[:, 0] - x
             dy = xyz[:, 1] - y
-            r2 = dx**2 + dy**2
+            dy2 = dy**2
+            r2 = dx2 + dy2
             index_within_radius = r2 < radius2
             #print(r2[:3], radius[:3])
             if any(index_within_radius):
