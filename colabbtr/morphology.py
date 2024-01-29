@@ -135,6 +135,30 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0):
 def surfing(xyz, radius, config):
     """
     Compute the maximum height (z-value) of molecular surface at grid points on AFM stage (where z=0)
+        Input: xyz (tensor of size (*, N, 3))
+                radius (tensor of size (N,))
+                config (dict)
+        Output: z_stage (tensor of size (*, len(y_stage), len(x_stage))
+    """
+    radius2 = radius**2
+    x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"], dtype=xyz.dtype, device=xyz.device) + 0.5*config["resolution_x"] #(W,)
+    y_stage = torch.arange(config["min_y"], config["max_y"], config["resolution_y"], dtype=xyz.dtype, device=xyz.device) + 0.5*config["resolution_y"] #(H,)
+
+    dx = xyz[...,0,None] - x_stage #(*,N,W)
+    dx2 = dx**2 #(*,N,W)
+    dy = xyz[...,1,None] - y_stage #(*,N,H)
+    dy2 = dy**2 #(*,N,H)
+    r2 = dx2.unsqueeze(-2) + dy2[...,None] #(*,N,H,W)
+    index_within_radius = r2 < radius2[...,None,None] #(*,N,H,W)
+    temp = xyz[...,2,None,None] + torch.sqrt(radius2[...,None,None] - r2) #(*,N,H,W)
+    temp[~index_within_radius] = -torch.inf
+    temp_max = temp.max(dim=-3)[0] #(*,H,W)
+    z_stage = torch.where(index_within_radius.any(dim=-3), temp_max, torch.zeros_like(temp_max, dtype=xyz.dtype, device=xyz.device)) #(H,W)
+    return z_stage.flip([0])
+
+def surfing_old(xyz, radius, config):
+    """
+    Compute the maximum height (z-value) of molecular surface at grid points on AFM stage (where z=0)
         Input: xyz (tensor of size (N, 3))
                 radius (tensor of size (N,))
                 config (dict)
