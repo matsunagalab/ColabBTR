@@ -154,7 +154,7 @@ def surfing(xyz, radius, config):
     temp[~index_within_radius] = -torch.inf
     temp_max = temp.max(dim=-3)[0] #(*,H,W)
     z_stage = torch.where(index_within_radius.any(dim=-3), temp_max, torch.zeros_like(temp_max, dtype=xyz.dtype, device=xyz.device)) #(H,W)
-    return z_stage.flip([0])
+    return z_stage.flip([-2])
 
 def surfing_old(xyz, radius, config):
     """
