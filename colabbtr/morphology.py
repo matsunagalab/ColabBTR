@@ -59,7 +59,7 @@ def ierosion(surface, tip):
     in_channels = 1
     out_channels = 1
     kernel_size, _ = tip.shape
-    H, W = image.shape
+    H, W = surface.shape
     x = surface.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
     x = fixed_padding(x, kernel_size, dilation=1)
     unfold = nn.Unfold(kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
