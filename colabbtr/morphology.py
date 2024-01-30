@@ -1,5 +1,5 @@
 import torch
-import math
+#import math
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, TensorDataset
@@ -29,6 +29,7 @@ def idilation(image, tip):
     """
     in_channels = 1
     out_channels = 1
+    H, W = image.shape
     kernel_size, _ = tip.shape
     x = image.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
     x = fixed_padding(x, kernel_size, dilation=1)
@@ -36,14 +37,15 @@ def idilation(image, tip):
     x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
     L = x.size(-1)
-    L_sqrt = int(math.sqrt(L))
+    #L_sqrt = int(math.sqrt(L))
 
     weight = tip.unsqueeze(0).unsqueeze(0)  # (1, 1, kH, kW)
     weight = weight.view(out_channels, -1) # (Cout, Cin*kH*kW)
     weight = weight.unsqueeze(0).unsqueeze(-1)  # (1, Cout, Cin*kH*kW, 1)
     x = weight + x # (B, Cout, Cin*kH*kW, L)
     x, _ = torch.max(x, dim=2, keepdim=False) # (B, Cout, L)
-    x = x.view(-1, out_channels, L_sqrt, L_sqrt)  # (B, Cout, L/2, L/2)
+    #x = x.view(-1, out_channels, L_sqrt, L_sqrt)  # (B, Cout, L/2, L/2)
+    x = x.view(-1, out_channels, H, W)  # (B, Cout, H, W)
     return x.squeeze(0).squeeze(0)
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
@@ -57,13 +59,14 @@ def ierosion(surface, tip):
     in_channels = 1
     out_channels = 1
     kernel_size, _ = tip.shape
+    H, W = image.shape
     x = surface.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
     x = fixed_padding(x, kernel_size, dilation=1)
     unfold = nn.Unfold(kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
     L = x.size(-1)
-    L_sqrt = int(math.sqrt(L))
+    #L_sqrt = int(math.sqrt(L))
 
     weight = tip.unsqueeze(0).unsqueeze(0)  # (1, 1, kH, kW)
     weight = weight.view(out_channels, -1) # (Cout, Cin*kH*kW)
@@ -71,7 +74,8 @@ def ierosion(surface, tip):
     x = weight - x # (B, Cout, Cin*kH*kW, L)
     x, _ = torch.max(x, dim=2, keepdim=False) # (B, Cout, L)
     x = -1 * x
-    x = x.view(-1, out_channels, L_sqrt, L_sqrt)  # (B, Cout, L/2, L/2)
+    #x = x.view(-1, out_channels, L_sqrt, L_sqrt)  # (B, Cout, L/2, L/2)
+    x = x.view(-1, out_channels, H, W)  # (B, Cout, H, W)
     return x.squeeze(0).squeeze(0)
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
