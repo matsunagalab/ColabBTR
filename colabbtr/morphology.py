@@ -166,7 +166,7 @@ def translate_tip_mean(P, cutoff=10**(-8)):
 
     return P_new
 
-def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0):
+def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, is_tqdm=True):
     """
     Reconstruct tip shape from given AFM images by differentiable blind tip reconstruction (BTR)
         Input: images (tensor of size (nframe, image_height, image_width)
@@ -184,7 +184,7 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0):
     optimizer = optim.AdamW([tip], lr=lr, weight_decay=weight_decay)
 
     loss_train = []
-    for epoch in tqdm(range(nepoch)):
+    for _ in tqdm(range(nepoch), disable=not is_tqdm):
         loss_tmp = 0.0
         for iframe in range(images.shape[0]):
             optimizer.zero_grad()
