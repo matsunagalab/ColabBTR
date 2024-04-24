@@ -18,6 +18,17 @@ def compute_xc_yc(tip):
     return xc, yc
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
+@torch.jit.script
+def fixed_padding(inputs, kernel_size, dilation):
+    kernel_size_effective = kernel_size + (kernel_size - 1) * (dilation - 1)
+    pad_total = kernel_size_effective - 1
+    pad_beg:int = int(pad_total // 2)
+    pad_end:int = int(pad_total - pad_beg)
+    padded_inputs = F.pad(inputs, (pad_beg, pad_end, pad_beg, pad_end))
+    return padded_inputs
+
+# ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
+@torch.jit.script
 def idilation(image, tip):
     """
     Compute the dilation of surface by tip
@@ -32,9 +43,8 @@ def idilation(image, tip):
     H, W = image.shape
     kernel_size, _ = tip.shape
     x = image.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    x = fixed_padding(x, kernel_size, dilation=1)
-    unfold = nn.Unfold(kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
-    x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
+    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1))
+    x = F.unfold(x, kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
     L = x.size(-1)
     #L_sqrt = int(math.sqrt(L))
@@ -49,6 +59,7 @@ def idilation(image, tip):
     return x.squeeze(0).squeeze(0)
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
+@torch.jit.script
 def ierosion(surface, tip):
     """
     Compute the erosion of image by tip
@@ -61,9 +72,9 @@ def ierosion(surface, tip):
     kernel_size, _ = tip.shape
     H, W = surface.shape
     x = surface.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    x = fixed_padding(x, kernel_size, dilation=1)
-    unfold = nn.Unfold(kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
-    x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
+    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1))
+    x = F.unfold(x, kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
+    # x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
     L = x.size(-1)
     #L_sqrt = int(math.sqrt(L))
@@ -77,15 +88,6 @@ def ierosion(surface, tip):
     #x = x.view(-1, out_channels, L_sqrt, L_sqrt)  # (B, Cout, L/2, L/2)
     x = x.view(-1, out_channels, H, W)  # (B, Cout, H, W)
     return x.squeeze(0).squeeze(0)
-
-# ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
-def fixed_padding(inputs, kernel_size, dilation):
-    kernel_size_effective = kernel_size + (kernel_size - 1) * (dilation - 1)
-    pad_total = kernel_size_effective - 1
-    pad_beg = pad_total // 2
-    pad_end = pad_total - pad_beg
-    padded_inputs = F.pad(inputs, (pad_beg, pad_end, pad_beg, pad_end))
-    return padded_inputs
 
 def idilation_old(surface, tip):
     """
@@ -205,7 +207,8 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, i
     tip_estimate = tip.detach()
     return tip_estimate, loss_train
 
-def surfing(xyz, radius, config):
+@torch.jit.script
+def surfing(xyz, radius, config:dict[str, float]):
     """
     Compute the maximum height (z-value) of molecular surface at grid points on AFM stage (where z=0)
         Input: xyz (tensor of size (*, N, 3))
@@ -223,8 +226,9 @@ def surfing(xyz, radius, config):
     dy2 = dy**2 #(*,N,H)
     r2 = dx2.unsqueeze(-2) + dy2[...,None] #(*,N,H,W)
     index_within_radius = r2 < radius2[...,None,None] #(*,N,H,W)
-    temp = xyz[...,2,None,None] + torch.sqrt(radius2[...,None,None] - r2) #(*,N,H,W)
-    temp[~index_within_radius] = -torch.inf
+    diff = radius2[...,None,None] - r2
+    diff = torch.where(index_within_radius, diff, 1) #(*,N,H,W)
+    temp = torch.where(index_within_radius, xyz[...,2,None,None] + torch.sqrt(diff), -torch.inf) #(*,N,H,W)
     temp_max = temp.max(dim=-3)[0] #(*,H,W)
     z_stage = torch.where(index_within_radius.any(dim=-3), temp_max, torch.zeros_like(temp_max, dtype=xyz.dtype, device=xyz.device)) #(H,W)
     return z_stage.flip([-2])
