@@ -59,6 +59,7 @@ def idilation(image, tip):
     return x.squeeze(0).squeeze(0)
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
+@torch.jit.script
 def ierosion(surface, tip):
     """
     Compute the erosion of image by tip
@@ -71,7 +72,7 @@ def ierosion(surface, tip):
     kernel_size, _ = tip.shape
     H, W = surface.shape
     x = surface.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    x = fixed_padding(x, kernel_size, dilation=1)
+    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1))
     unfold = nn.Unfold(kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
