@@ -73,8 +73,8 @@ def ierosion(surface, tip):
     H, W = surface.shape
     x = surface.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
     x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1))
-    unfold = nn.Unfold(kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
-    x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
+    x = F.unfold(x, kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
+    # x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
     L = x.size(-1)
     #L_sqrt = int(math.sqrt(L))
