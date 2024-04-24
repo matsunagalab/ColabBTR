@@ -10,3 +10,7 @@ dependencies = [
     "torch",
     "tqdm",
 ]
+
+[tool.setuptools]
+packages = ["colabbtr"]
+
