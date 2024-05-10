@@ -275,7 +275,7 @@ def afmize(xyz, tip, radius, config):
     image = idilation(surface, tip)
     return image
 
-# mapping atom name to radius in Angstrom
+# mapping atom name to radius in nanometer
 Atom2Radius = {
     "H": 0.120,
     "HE": 0.140,
