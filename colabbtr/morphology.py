@@ -355,3 +355,29 @@ Atom2Radius = {
     "LYS": 0.32,
     "GLU": 0.295
 }
+
+def define_tip(tip, resolution_x, resolution_y, probeRadius, probeAngle):
+    """
+    Define the tip shape by the probe radius and angle
+        Input: tip (tensor of size (tip_height, tip_width))
+               resolution_x (float)
+               resolution_y (float)
+               probeRadius (float)
+               probeAngle (float)
+        Output: tip (tensor of size (tip_height, tip_width))
+    """
+    tip_xsiz, tip_ysiz = tip.shape
+    xc, yc = compute_xc_yc(tip)
+    for ix in range(tip_xsiz):
+        for iy in range(tip_ysiz):
+            x = resolution_x * abs(ix - xc)
+            y = resolution_y * abs(iy - yc)
+            d = math.sqrt(x**2 + y**2)
+            if d <= probeRadius:
+                z = math.sqrt(probeRadius**2 - d**2)
+            else:
+                theta = (0.5 * math.pi) - probeAngle
+                z = -math.tan(theta) * (d - probeRadius)
+            tip[ix, iy] = z
+    tip -= tip.max()
+    return tip
