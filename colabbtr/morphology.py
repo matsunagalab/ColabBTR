@@ -381,3 +381,120 @@ def define_tip(tip, resolution_x, resolution_y, probeRadius, probeAngle):
             tip[ix, iy] = z
     tip -= tip.max()
     return tip
+
+######################################################################################
+# PINN
+######################################################################################
+
+class TipShapeMLP(nn.Module):
+    def __init__(self, hidden_layers=[64, 64]):
+        super().__init__()
+        layers = [nn.Linear(2, hidden_layers[0]), nn.ReLU()]
+        for i in range(1, len(hidden_layers)):
+            layers.extend([nn.Linear(hidden_layers[i-1], hidden_layers[i]), nn.ReLU()])
+        layers.append(nn.Linear(hidden_layers[-1], 1))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x, y):
+        xy = torch.stack([x, y], dim=-1)
+        return self.net(xy).squeeze(-1)
+
+def generate_tip_from_mlp(tip_mlp, kernel_size, device=None):
+    """
+    Generate a 2D tensor tip shape from TipShapeMLP
+    
+    Args:
+    tip_mlp (TipShapeMLP): The MLP model for tip shape
+    kernel_size (int): The size of the kernel (assumed to be square)
+    device (torch.device, optional): The device to put the tensor on
+    
+    Returns:
+    torch.Tensor: A 2D tensor representing the tip shape
+    """
+    if device is None:
+        device = next(tip_mlp.parameters()).device
+
+    x = torch.linspace(-1, 1, kernel_size, device=device)
+    y = torch.linspace(-1, 1, kernel_size, device=device)
+    X, Y = torch.meshgrid(x, y, indexing='ij')
+
+    with torch.set_grad_enabled(tip_mlp.training):
+        tip = tip_mlp(X.flatten(), Y.flatten()).view(kernel_size, kernel_size)
+
+    return tip
+
+def idilation_mlp(image, tip_mlp, kernel_size):
+    """
+    Compute the dilation of surface by tip represented as MLP
+    
+    Args:
+    image (torch.Tensor): Input image of size (surface_height, surface_width)
+    tip_mlp (TipShapeMLP): The MLP model for tip shape
+    kernel_size (int): The size of the kernel for the tip
+
+    Returns:
+    torch.Tensor: Dilated image of size (image_height, image_width)
+    """
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size, device=image.device)
+    return idilation(image, tip)
+
+def ierosion_mlp(surface, tip_mlp, kernel_size):
+    """
+    Compute the erosion of image by tip represented as MLP
+    
+    Args:
+    surface (torch.Tensor): Input surface of size (surface_height, surface_width)
+    tip_mlp (TipShapeMLP): The MLP model for tip shape
+    kernel_size (int): The size of the kernel for the tip
+
+    Returns:
+    torch.Tensor: Eroded surface of size (surface_height, surface_width)
+    """
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size, device=surface.device)
+    return ierosion(surface, tip)
+
+class BTRLoss(nn.Module):
+    def __init__(self, tip_mlp, kernel_size, boundary_weight=1.0):
+        super().__init__()
+        self.tip_mlp = tip_mlp
+        self.kernel_size = kernel_size
+        self.boundary_weight = boundary_weight
+
+    def forward(self, images):
+        batch_size = images.shape[0]
+        total_loss = 0.0
+
+        for i in range(batch_size):
+            image = images[i]
+            
+            # Erosion followed by dilation
+            eroded = ierosion_mlp(image, self.tip_mlp, self.kernel_size)
+            reconstructed = idilation_mlp(eroded, self.tip_mlp, self.kernel_size)
+
+            # Reconstruction loss (MSE)
+            recon_loss = torch.mean((reconstructed - image) ** 2)
+
+            # Boundary condition loss
+            x_boundary = torch.cat([torch.ones(self.kernel_size) * -1, torch.ones(self.kernel_size)])
+            y_boundary = torch.cat([torch.ones(self.kernel_size) * -1, torch.ones(self.kernel_size)])
+            boundary_heights = self.tip_mlp(x_boundary, y_boundary)
+            boundary_loss = torch.mean((boundary_heights - (-100)) ** 2)
+
+            # Combine losses
+            total_loss += recon_loss + self.boundary_weight * boundary_loss
+
+        return total_loss / batch_size
+
+# Usage example
+#tip_mlp = TipShapeMLP()
+#criterion = BTRLoss(tip_mlp, kernel_size=64, boundary_weight=1.0)
+#optimizer = torch.optim.Adam(tip_mlp.parameters(), lr=0.001)
+
+# Training loop
+#for epoch in range(num_epochs):
+#    for batch in dataloader:
+#        optimizer.zero_grad()
+#        loss = criterion(batch)
+#        loss.backward()
+#        optimizer.step()
+
