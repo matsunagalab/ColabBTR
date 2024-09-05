@@ -498,13 +498,13 @@ class BTRLoss(nn.Module):
 #loss_train = []
 
 #if dataloader.dim == 4:
-#for epoch in range(num_epochs):
-#    for batch in dataloader:
-#        optimizer.zero_grad()
-#        loss = criterion(batch)
-#        loss.backward()
-#        optimizer.step()
-#        loss_train.append(loss)
+#    for epoch in range(num_epochs):
+#        for batch in dataloader:
+#             optimizer.zero_grad()
+#             loss = criterion(batch)
+#             loss.backward()
+#             optimizer.step()
+#             loss_train.append(loss)
 
 #if dataloader.dim == 3:
 #   for epoch in range(num_epochs):
