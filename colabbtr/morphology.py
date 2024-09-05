@@ -455,16 +455,26 @@ def ierosion_mlp(surface, tip_mlp, kernel_size):
     tip = generate_tip_from_mlp(tip_mlp, kernel_size, device=surface.device)
     return ierosion(surface, tip)
 
+import torch
+import torch.nn as nn
+
 class BTRLoss(nn.Module):
-    def __init__(self, tip_mlp, kernel_size, boundary_weight):
+    def __init__(self, tip_mlp, kernel_size, boundary_weight, height_constraint_weight=1.0):
         super().__init__()
         self.tip_mlp = tip_mlp
         self.kernel_size = kernel_size
         self.boundary_weight = boundary_weight
+        self.height_constraint_weight = height_constraint_weight
 
     def forward(self, images):
         batch_size = images.shape[0]
         total_loss = 0.0
+
+        # Generate full tip shape
+        x = torch.linspace(-1, 1, self.kernel_size)
+        y = torch.linspace(-1, 1, self.kernel_size)
+        X, Y = torch.meshgrid(x, y, indexing='ij')
+        tip_shape = self.tip_mlp(X.flatten(), Y.flatten()).view(self.kernel_size, self.kernel_size)
 
         for i in range(batch_size):
             image = images[i]
@@ -483,8 +493,11 @@ class BTRLoss(nn.Module):
             boundary_heights = self.tip_mlp(X.flatten(), Y.flatten())
             boundary_loss = torch.mean((boundary_heights - (-100)) ** 2)
 
+            # Height constraint loss
+            height_loss = torch.mean(torch.relu(tip_shape)) + torch.mean((tip_shape.max() - 0) ** 2)
+
             # Combine losses
-            total_loss += recon_loss + self.boundary_weight * boundary_loss
+            total_loss += recon_loss + self.boundary_weight * boundary_loss + self.height_constraint_weight * height_loss
 
         return total_loss / batch_size
 
