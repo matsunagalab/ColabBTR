@@ -392,8 +392,8 @@ class TipShapeMLP(nn.Module):
         n_input = 2*(n_size**2)
         n_output = n_size**2
         self.l_in = nn.Linear(n_input, n_nodes)
-        self.l_hidden = nn.Linear(len(n_nodes),len(n_nodes))
-        self.l_out = nn.Linear(len(n_nodes),n_output)
+        self.l_hidden = nn.Linear(n_nodes,n_nodes)
+        self.l_out = nn.Linear(n_nodes,n_output)
         self.relu = nn.ReLU() 
         self.n_hidden = n_hidden_layers
 
