@@ -528,6 +528,6 @@ def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
             loss_train.append(loss)
 
 
-    tip = generate_tip_from_mlp(tip_mlp, kernel_size)
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size,device=None)
     return loss_train, tip
 
