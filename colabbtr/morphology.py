@@ -502,32 +502,32 @@ class BTRLoss(nn.Module):
         return total_loss / batch_size
 
 # Usage example
-#def Tip_mlp(dataloder,num_epochs,lr,kernel_size,boundaryweight)
-#tip_mlp = TipShapeMLP(n_size=kernel_size, hidden_layers=[64,64])
-#criterion = BTRLoss(tip_mlp, kernel_size=64, boundary_weight=1.0)
-#optimizer = torch.optim.Adam(tip_mlp.parameters(), lr=0.001)
+def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
+    tip_mlp = TipShapeMLP(n_size=kernel_size, hidden_layers=[64,64])
+    criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight)
+    optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
 
 # Training loop
-#loss_train = []
+    loss_train = []
 
-#if dataloader.dim == 4:
-#    for epoch in range(num_epochs):
-#        for batch in dataloader:
-#             optimizer.zero_grad()
-#             loss = criterion(batch)
-#             loss.backward()
-#             optimizer.step()
-#             loss_train.append(loss)
+    if dataloder.dim == 4:
+        for epoch in range(num_epochs):
+            for batch in dataloder:
+                optimizer.zero_grad()
+                loss = criterion(batch)
+                loss.backward()
+                optimizer.step()
+                loss_train.append(loss)
 
-#if dataloader.dim == 3:
-#   for epoch in range(num_epochs):
-#        optimizer.zero_grad()
-#        loss = criterion(batch)
-#        loss.backward()
-#        optimizer.step()
-#        loss_train.append(loss)
+    if dataloder.dim == 3:
+        for epoch in range(num_epochs):
+            optimizer.zero_grad()
+            loss = criterion(batch)
+            loss.backward()
+            optimizer.step()
+            loss_train.append(loss)
 
 
-#tip = generate_tip_from_mlp(tip_mlp, kernel_size)
-#return loss_train, tip
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size)
+    return loss_train, tip
 
