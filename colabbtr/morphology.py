@@ -400,7 +400,7 @@ class TipShapeMLP(nn.Module):
         
 
     def forward(self, x, y):
-        xy = torch.stack([x, y], dim=-1)
+        xy = torch.cat([x, y], dim=0)
 
         layers = []
         layers.append(self.relu(self.l_in(xy)))
@@ -519,7 +519,7 @@ def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
 # Training loop
     loss_train = []
 
-    if dataloder.dim == 4:
+    if dataloder.dim() == 4:
         for epoch in range(num_epochs):
             for batch in dataloder:
                 optimizer.zero_grad()
@@ -528,7 +528,7 @@ def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
                 optimizer.step()
                 loss_train.append(loss)
 
-    if dataloder.dim == 3:
+    if dataloder.dim() == 3:
         for epoch in range(num_epochs):
             optimizer.zero_grad()
             loss = criterion(batch)
@@ -537,6 +537,6 @@ def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
             loss_train.append(loss)
 
 
-    tip = generate_tip_from_mlp(tip_mlp, kernel_size,device=None)
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size,device=None)
     return loss_train, tip
 
