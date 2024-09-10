@@ -387,19 +387,28 @@ def define_tip(tip, resolution_x, resolution_y, probeRadius, probeAngle):
 ######################################################################################
 
 class TipShapeMLP(nn.Module):
-    def __init__(self,n_size,hidden_layers):
+    def __init__(self,n_size,n_hidden_layers,n_nodes):
         super().__init__()
         n_input = 2*(n_size**2)
         n_output = n_size**2
-        layers = [nn.ReLU(nn.Linear(n_input, hidden_layers[0]))]
-        for i in range(1, len(hidden_layers)):
-            layers.extend([nn.ReLU(nn.Linear(hidden_layers[i-1], hidden_layers[i]))])
-        layers.append(nn.Linear(hidden_layers[i], n_output))
-        self.net = nn.Sequential(*layers)
+        self.l_in = nn.Linear(n_input, n_nodes)
+        self.l_hidden = nn.Linear(n_nodes,n_nodes)
+        self.l_out = nn.Linear(n_nodes,n_output)
+        self.relu = nn.ReLU() 
+        self.n_hidden = n_hidden_layers
+
+        
 
     def forward(self, x, y):
         xy = torch.stack([x, y], dim=-1)
-        return self.net(xy).squeeze(-1)
+
+        layers = []
+        layers.append(self.relu(self.l_in(xy)))
+        for i in range(1, self.n_hidden):
+            layers.append(self.relu(self.l_hidden(layers[i-1])))
+        layers.append(self.relu(self.l_out(layers[self.n_hidden])))
+
+        return layers[self.n_hidden+1]
 
 def generate_tip_from_mlp(tip_mlp, kernel_size, device):
     """
@@ -503,7 +512,7 @@ class BTRLoss(nn.Module):
 
 # Usage example
 def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
-    tip_mlp = TipShapeMLP(n_size=kernel_size, hidden_layers=[64,64])
+    tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=64,n_nodes=64)
     criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight)
     optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
 
