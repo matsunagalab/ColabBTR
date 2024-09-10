@@ -468,7 +468,7 @@ import torch
 import torch.nn as nn
 
 class BTRLoss(nn.Module):
-    def __init__(self, tip_mlp, kernel_size, boundary_weight, height_constraint_weight=1.0):
+    def __init__(self, tip_mlp, kernel_size, boundary_weight, height_constraint_weight):
         super().__init__()
         self.tip_mlp = tip_mlp
         self.kernel_size = kernel_size
@@ -511,9 +511,9 @@ class BTRLoss(nn.Module):
         return total_loss / batch_size
 
 # Usage example
-def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
+def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight,height_constraint_weight):
     tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=64,n_nodes=64)
-    criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight)
+    criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight,height_constraint_weight=height_constraint_weight)
     optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
 
 # Training loop
@@ -531,7 +531,7 @@ def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight):
     if dataloder.dim() == 3:
         for epoch in range(num_epochs):
             optimizer.zero_grad()
-            loss = criterion(batch)
+            loss = criterion(dataloder)
             loss.backward()
             optimizer.step()
             loss_train.append(loss)
