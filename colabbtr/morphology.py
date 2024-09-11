@@ -404,7 +404,7 @@ class TipShapeMLP(nn.Module):
 
         layers = []
         layers.append(self.relu(self.l_in(xy)))
-        for i in range(1, self.n_hidden):
+        for i in range(1, self.n_hidden+1):
             layers.append(self.relu(self.l_hidden(layers[i-1])))
         layers.append(self.relu(self.l_out(layers[self.n_hidden])))
 
