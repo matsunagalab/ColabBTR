@@ -480,8 +480,8 @@ class BTRLoss(nn.Module):
         total_loss = 0.0
 
         # Generate full tip shape
-        x = torch.linspace(-1, 1, self.kernel_size)
-        y = torch.linspace(-1, 1, self.kernel_size)
+        x = torch.linspace(-1, 1, self.kernel_size,device=image.device)
+        y = torch.linspace(-1, 1, self.kernel_size,device=image.device)
         X, Y = torch.meshgrid(x, y, indexing='ij')
         tip_shape = self.tip_mlp(X.flatten(), Y.flatten()).view(self.kernel_size, self.kernel_size)
 
@@ -496,9 +496,6 @@ class BTRLoss(nn.Module):
             recon_loss = torch.mean((reconstructed - image) ** 2)
 
             # Boundary condition loss
-            x_boundary = torch.linspace(-1, 1, self.kernel_size, device=image.device)
-            y_boundary = torch.linspace(-1, 1, self.kernel_size, device=image.device)
-            X, Y = torch.meshgrid(x_boundary, y_boundary, indexing='ij')
             boundary_heights = self.tip_mlp(X.flatten(), Y.flatten())
             boundary_loss = torch.mean((boundary_heights - (-100)) ** 2)
 
