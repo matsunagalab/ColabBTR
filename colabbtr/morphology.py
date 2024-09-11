@@ -511,8 +511,8 @@ class BTRLoss(nn.Module):
         return total_loss / batch_size
 
 # Usage example
-def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight,height_constraint_weight):
-    tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=64,n_nodes=64)
+def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight,height_constraint_weight,n_hidden_layers,n_nodes):
+    tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=n_hidden_layers, n_nodes=n_nodes)
     criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight,height_constraint_weight=height_constraint_weight)
     optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
 
