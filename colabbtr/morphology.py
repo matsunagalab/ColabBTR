@@ -400,7 +400,7 @@ class TipShapeMLP(nn.Module):
         
 
     def forward(self, x, y):
-        xy = torch.cat([x, y], dim=0)
+        xy = torch.cat([x, y], dim=0).to(x.device)
 
         layers = []
         layers.append(self.relu(self.l_in(xy)))
@@ -511,7 +511,7 @@ class BTRLoss(nn.Module):
 def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight,height_constraint_weight,n_hidden_layers,n_nodes,device):
     tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=n_hidden_layers, n_nodes=n_nodes).to(device)
     criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight,height_constraint_weight=height_constraint_weight).to(device)
-    optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
+    optimizer = torch.optim.Adam(tip_mlp.parameters(), lr).to(device)
 
 # Training loop
     loss_train = []
