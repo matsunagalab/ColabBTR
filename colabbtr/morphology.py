@@ -391,24 +391,35 @@ class TipShapeMLP(nn.Module):
         super().__init__()
         n_input = 2*(n_size**2)
         n_output = n_size**2
-        self.l_in = nn.Linear(n_input, n_nodes)
-        self.l_hidden = nn.Linear(n_nodes,n_nodes)
-        self.l_out = nn.Linear(n_nodes,n_output)
-        self.relu = nn.ReLU() 
-        self.n_hidden = n_hidden_layers
 
+        self.l_in = nn.Sequential(
+            nn.Linear(n_input,n_nodes),
+            nn.ReLU()
+        )
+
+        layers=[]
+        for i in range(0,n_hidden_layers):
+            layers.extend = nn.Sequential(
+            nn.Linear(n_nodes,n_nodes),
+            nn.ReLU()
+            )
+        self.l_hidden = nn.Sequential(*layers)
+
+        self.l_out = nn.Sequential(
+            nn.Linear(n_nodes,n_output),
+            nn.ReLU()
+        )
+
+        self.n_hidden = n_hidden_layers
         
 
     def forward(self, x, y):
         xy = torch.cat([x, y], dim=0).to(x.device)
-
-        layers = []
-        layers.append(self.relu(self.l_in(xy)))
-        for i in range(1, self.n_hidden+1):
-            layers.append(self.relu(self.l_hidden(layers[i-1])))
-        layers.append(self.relu(self.l_out(layers[self.n_hidden])))
-
-        return layers[self.n_hidden+1]
+        xy2 = self.l_in(xy)
+        xy3 = self.l_hidden(xy2)
+        xy4 = self.l_out(xy3)
+        
+        return xy4
 
 def generate_tip_from_mlp(tip_mlp, kernel_size, device):
     """
@@ -510,7 +521,7 @@ class BTRLoss(nn.Module):
 # Usage example
 def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight,height_constraint_weight,n_hidden_layers,n_nodes,device):
     tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=n_hidden_layers, n_nodes=n_nodes).to(device)
-    criterion = BTRLoss(tip_mlp=tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight,height_constraint_weight=height_constraint_weight).to(device)
+    criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, boundary_weight=boundary_weight,height_constraint_weight=height_constraint_weight).to(device)
     optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
 
 # Training loop
