@@ -399,10 +399,10 @@ class TipShapeMLP(nn.Module):
 
         layers=[]
         for i in range(0,n_hidden_layers):
-            layers.extend = nn.Sequential(
+            layers.extend(nn.Sequential(
             nn.Linear(n_nodes,n_nodes),
             nn.ReLU()
-            )
+            ))
         self.l_hidden = nn.Sequential(*layers)
 
         self.l_out = nn.Sequential(
