@@ -399,10 +399,10 @@ class TipShapeMLP(nn.Module):
 
         layers=[]
         for i in range(0,n_hidden_layers):
-            layers.extend = nn.Sequential(
+            layers.extend(nn.Sequential(
             nn.Linear(n_nodes,n_nodes),
             nn.ReLU()
-            )
+            ))
         self.l_hidden = nn.Sequential(*layers)
 
         self.l_out = nn.Sequential(
@@ -527,22 +527,14 @@ def Tip_mlp(dataloder,num_epochs, lr, kernel_size, boundary_weight,height_constr
 # Training loop
     loss_train = []
 
-    if dataloder.dim() == 4:
-        for epoch in range(num_epochs):
+    for epoch in range(num_epochs):
             for batch in dataloder:
                 optimizer.zero_grad()
                 loss = criterion(batch)
                 loss.backward()
                 optimizer.step()
-                loss_train.append(loss)
-
-    if dataloder.dim() == 3:
-        for epoch in range(num_epochs):
-            optimizer.zero_grad()
-            loss = criterion(dataloder)
-            loss.backward()
-            optimizer.step()
-            loss_train.append(loss)
+                loss_train.append(loss)    
+       
 
 
     tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size,device=device)
