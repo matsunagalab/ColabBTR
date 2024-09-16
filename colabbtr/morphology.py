@@ -491,8 +491,8 @@ class BTRLoss(nn.Module):
         total_loss = 0.0
 
         # Generate full tip shape
-        x = torch.linspace(-1, 1, self.kernel_size,device=image.device)
-        y = torch.linspace(-1, 1, self.kernel_size,device=image.device)
+        x = torch.linspace(-1, 1, self.kernel_size,device=images.device)
+        y = torch.linspace(-1, 1, self.kernel_size,device=images.device)
         X, Y = torch.meshgrid(x, y, indexing='ij')
         tip_shape = self.tip_mlp(X.flatten(), Y.flatten()).view(self.kernel_size, self.kernel_size)
 
