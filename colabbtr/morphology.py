@@ -418,8 +418,8 @@ class TipShapeMLP(nn.Module):
         xy2 = self.l_in(xy)
         xy3 = self.l_hidden(xy2)
         xy4 = self.l_out(xy3)
-        
-        return xy4
+        tip = -xy4
+        return tip
 
 def generate_tip_from_mlp(tip_mlp, kernel_size, tip_size, device):
     """
