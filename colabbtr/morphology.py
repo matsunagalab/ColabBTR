@@ -405,10 +405,7 @@ class TipShapeMLP(nn.Module):
             ))
         self.l_hidden = nn.Sequential(*layers)
 
-        self.l_out = nn.Sequential(
-            nn.Linear(n_nodes,n_output),
-            nn.ReLU()
-        )
+        self.l_out = nn.Linear(n_nodes,n_output)
 
         self.n_hidden = n_hidden_layers
         
@@ -518,7 +515,7 @@ class BTRLoss(nn.Module):
             total_loss += recon_loss + self.boundary_weight * boundary_loss + self.height_constraint_weight * height_loss
 
         return total_loss / batch_size
-
+          
 # Usage example
 def Tip_mlp(
         dataloder,num_epochs, lr, kernel_size, tip_size, boundary_weight,
