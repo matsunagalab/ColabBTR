@@ -476,14 +476,14 @@ import torch
 import torch.nn as nn
 
 class BTRLoss(nn.Module):
-    def __init__(self, tip_mlp, kernel_size, tip_size, boundary_weight, height_constraint_weight):
+    def __init__(self, tip_mlp, kernel_size, tip_size, boundary_weight, weight_decay, height_constraint_weight):
         super().__init__()
         self.tip_mlp = tip_mlp
         self.kernel_size = kernel_size
         self.boundary_weight = boundary_weight
         self.height_constraint_weight = height_constraint_weight
         self.tip_size = tip_size
-
+        self.weight_decay = weight_decay
     def forward(self, images):
         batch_size = images.shape[0]
         total_loss = 0.0
@@ -508,22 +508,26 @@ class BTRLoss(nn.Module):
             boundary_heights = self.tip_mlp(X.flatten(), Y.flatten())
             boundary_loss = torch.mean((boundary_heights - (-100)) ** 2)
 
+            regularization_loss = torch.sum(boundary_heights**2)
+
+            
+
             # Height constraint loss
-            height_loss = torch.mean(torch.relu(tip_shape)) + torch.mean((tip_shape.max() - 0) ** 2)
+            height_loss = torch.mean(torch.relu(tip_shape)) + torch.mean((tip_shape.max() - 0) ** 2) 
 
             # Combine losses
-            total_loss += recon_loss + self.boundary_weight * boundary_loss + self.height_constraint_weight * height_loss
+            total_loss += recon_loss + self.boundary_weight * boundary_loss + self.height_constraint_weight * height_loss + self.weight_decay * regularization_loss
 
         return total_loss / batch_size
           
 # Usage example
 def Tip_mlp(
         dataloder,num_epochs, lr, kernel_size, tip_size, boundary_weight,
-        height_constraint_weight,n_hidden_layers,n_nodes,device):
+        height_constraint_weight, weight_decay, n_hidden_layers,n_nodes,device):
     tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=n_hidden_layers,
                         n_nodes=n_nodes).to(device)
     criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, tip_size=tip_size, 
-                        boundary_weight=boundary_weight,
+                        boundary_weight=boundary_weight, weight_decay=weight_decay,
                         height_constraint_weight=height_constraint_weight).to(device)
     optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
 
