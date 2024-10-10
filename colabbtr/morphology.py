@@ -389,8 +389,10 @@ def define_tip(tip, resolution_x, resolution_y, probeRadius, probeAngle):
 class TipShapeMLP(nn.Module):
     def __init__(self,n_size,n_hidden_layers,n_nodes):
         super().__init__()
-        n_input = 2*(n_size**2)
-        n_output = n_size**2
+        #n_input = 2*(n_size**2)
+        #n_output = n_size**2
+        n_input = 2
+        n_output = 1
 
         self.l_in = nn.Sequential(
             nn.Linear(n_input,n_nodes),
@@ -411,12 +413,14 @@ class TipShapeMLP(nn.Module):
         
 
     def forward(self, x, y):
-        xy = torch.cat([x, y], dim=0).to(x.device)
+        #t = torch.tensor([[0.0,0.0]]).float().to(x.device)
+        #xy = torch.cat((x, y, t), dim=0).to(x.device)
+        xy = torch.stack((x, y), dim=1).to(x.device)
         xy2 = self.l_in(xy)
         xy3 = self.l_hidden(xy2)
         xy4 = self.l_out(xy3)
-        tip = -xy4
-        return tip
+        tip = xy4
+        return -tip
 
 def generate_tip_from_mlp(tip_mlp, kernel_size, tip_size, device):
     """
@@ -476,7 +480,7 @@ import torch
 import torch.nn as nn
 
 class BTRLoss(nn.Module):
-    def __init__(self, tip_mlp, kernel_size, tip_size, boundary_weight, weight_decay, height_constraint_weight):
+    def __init__(self, tip_mlp, kernel_size, tip_size, boundary_weight, weight_decay, height_constraint_weight, average_weight):
         super().__init__()
         self.tip_mlp = tip_mlp
         self.kernel_size = kernel_size
@@ -484,6 +488,7 @@ class BTRLoss(nn.Module):
         self.height_constraint_weight = height_constraint_weight
         self.tip_size = tip_size
         self.weight_decay = weight_decay
+        self.average_weight = average_weight
     def forward(self, images):
         batch_size = images.shape[0]
         total_loss = 0.0
@@ -509,39 +514,44 @@ class BTRLoss(nn.Module):
             boundary_loss = torch.mean((boundary_heights - (-100)) ** 2)
 
             regularization_loss = torch.sum(boundary_heights**2)
+            average_loss = (torch.mean(boundary_heights))**2 
+            #torch.sum((boundary_heights/boundary_heights.min())**2)
+            #min_loss = boundary_heights.min()**2
 
-            
+            #for i in range(self.kernel_size):
+             #   for j in range(self.kernel_size):
+              #      sq =(1+((i-self.kernel_size/2)**2 + (j-self.kernel_size/2)**2))
+               #     regularization_loss += (tip_shape[i, j]  ** 2) / math.sqrt(sq)
 
             # Height constraint loss
-            height_loss = torch.mean(torch.relu(tip_shape)) + torch.mean((tip_shape.max() - 0) ** 2) 
+            height_loss = torch.mean(torch.relu(tip_shape)) + torch.mean((tip_shape.max() ) ** 2) 
 
             # Combine losses
-            total_loss += recon_loss + self.boundary_weight * boundary_loss + self.height_constraint_weight * height_loss + self.weight_decay * regularization_loss
+            total_loss += recon_loss + self.boundary_weight * boundary_loss + self.height_constraint_weight * height_loss + self.weight_decay * regularization_loss + self.average_weight * average_loss
 
-        return total_loss / batch_size
+        return total_loss / batch_size 
           
 # Usage example
 def Tip_mlp(
         dataloder,num_epochs, lr, kernel_size, tip_size, boundary_weight,
-        height_constraint_weight, weight_decay, n_hidden_layers,n_nodes,device):
+        height_constraint_weight, weight_decay, average_weight, n_hidden_layers,n_nodes,device):
     tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=n_hidden_layers,
                         n_nodes=n_nodes).to(device)
     criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, tip_size=tip_size, 
                         boundary_weight=boundary_weight, weight_decay=weight_decay,
-                        height_constraint_weight=height_constraint_weight).to(device)
+                        height_constraint_weight=height_constraint_weight, average_weight=average_weight).to(device)
     optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
 
 # Training loop
     loss_train = []
-
+    loss_train_recon = []
     for epoch in range(num_epochs):
             for batch in dataloder:
                 optimizer.zero_grad()
                 loss = criterion(batch)
                 loss.backward()
                 optimizer.step()
-            loss_train.append(loss)    
-       
+            loss_train.append(loss)
 
 
     tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size, tip_size=tip_size, device=device)
