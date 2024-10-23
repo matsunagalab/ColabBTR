@@ -391,7 +391,7 @@ class TipShapeMLP(nn.Module):
         super().__init__()
         #n_input = 2*(n_size**2)
         #n_output = n_size**2
-        n_input = 2
+        n_input = 3
         n_output = 1
 
         self.l_in = nn.Sequential(
@@ -412,17 +412,16 @@ class TipShapeMLP(nn.Module):
         self.n_hidden = n_hidden_layers
         
 
-    def forward(self, x, y):
-        #t = torch.tensor([[0.0,0.0]]).float().to(x.device)
-        #xy = torch.cat((x, y, t), dim=0).to(x.device)
-        xy = torch.stack((x, y), dim=1).to(x.device)
-        xy2 = self.l_in(xy)
-        xy3 = self.l_hidden(xy2)
-        xy4 = self.l_out(xy3)
-        tip = xy4
+    def forward(self, x, y, t):
+
+        xyt = torch.stack((x, y,t), dim=1).to(x.device)
+        xyt2 = self.l_in(xyt)
+        xyt3 = self.l_hidden(xyt2)
+        xyt4 = self.l_out(xyt3)
+        tip = xyt4
         return -tip
 
-def generate_tip_from_mlp(tip_mlp, kernel_size, tip_size, device):
+def generate_tip_from_mlp(tip_mlp, kernel_size, t, device):
     """
     Generate a 2D tensor tip shape from TipShapeMLP
     
@@ -437,16 +436,16 @@ def generate_tip_from_mlp(tip_mlp, kernel_size, tip_size, device):
     if device is None:
         device = next(tip_mlp.parameters()).device
 
-    x = torch.linspace(-tip_size/2, tip_size/2, kernel_size, device=device)
-    y = torch.linspace(-tip_size/2, tip_size/2, kernel_size, device=device)
+    x = torch.linspace(-kernel_size/2, kernel_size/2, kernel_size, device=device)
+    y = torch.linspace(-kernel_size/2, kernel_size/2, kernel_size, device=device)
     X, Y = torch.meshgrid(x, y, indexing='ij')
 
     with torch.set_grad_enabled(tip_mlp.training):
-        tip = tip_mlp(X.flatten(), Y.flatten()).view(kernel_size, kernel_size)
+        tip = tip_mlp(X.flatten(), Y.flatten(), t).view(kernel_size, kernel_size)
 
     return tip
 
-def idilation_mlp(image, tip_mlp, kernel_size, tip_size):
+def idilation_mlp(image, tip_mlp, kernel_size, t):
     """
     Compute the dilation of surface by tip represented as MLP
     
@@ -458,10 +457,10 @@ def idilation_mlp(image, tip_mlp, kernel_size, tip_size):
     Returns:
     torch.Tensor: Dilated image of size (image_height, image_width)
     """
-    tip = generate_tip_from_mlp(tip_mlp, kernel_size, tip_size, device=image.device)
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size, t, device=image.device)
     return idilation(image, tip)
 
-def ierosion_mlp(surface, tip_mlp, kernel_size, tip_size):
+def ierosion_mlp(surface, tip_mlp, kernel_size, t):
     """
     Compute the erosion of image by tip represented as MLP
     
@@ -473,88 +472,143 @@ def ierosion_mlp(surface, tip_mlp, kernel_size, tip_size):
     Returns:
     torch.Tensor: Eroded surface of size (surface_height, surface_width)
     """
-    tip = generate_tip_from_mlp(tip_mlp, kernel_size, tip_size, device=surface.device)
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size, t, device=surface.device)
     return ierosion(surface, tip)
 
 import torch
 import torch.nn as nn
 
 class BTRLoss(nn.Module):
-    def __init__(self, tip_mlp, kernel_size, tip_size, boundary_weight, weight_decay, height_constraint_weight, average_weight):
+    def __init__(self, tip_mlp, kernel_size, boundary_weight, weight_decay, height_constraint_weight, average_weight , centroid_weight):
         super().__init__()
         self.tip_mlp = tip_mlp
         self.kernel_size = kernel_size
         self.boundary_weight = boundary_weight
         self.height_constraint_weight = height_constraint_weight
-        self.tip_size = tip_size
         self.weight_decay = weight_decay
         self.average_weight = average_weight
-    def forward(self, images):
+        self.centroid_weight = centroid_weight
+        #self.time_weight = time_weight
+        
+    def forward(self, images,n):
         batch_size = images.shape[0]
         total_loss = 0.0
 
         # Generate full tip shape
-        x = torch.linspace(-self.tip_size/2, self.tip_size/2, self.kernel_size,device=images.device)
-        y = torch.linspace(-self.tip_size/2, self.tip_size/2, self.kernel_size,device=images.device)
+        x = torch.linspace(-self.kernel_size/2, self.kernel_size/2, self.kernel_size, device=images.device,requires_grad=True)
+        y = torch.linspace(-self.kernel_size/2, self.kernel_size/2, self.kernel_size, device=images.device,requires_grad=True)
+        
         X, Y = torch.meshgrid(x, y, indexing='ij')
-        tip_shape = self.tip_mlp(X.flatten(), Y.flatten()).view(self.kernel_size, self.kernel_size)
+        
 
         for i in range(batch_size):
             image = images[i]
-            
+            t_scalar = torch.tensor(n*batch_size+i, dtype=torch.float32, requires_grad=True).to(images.device)
+            t = t_scalar.expand_as(X.flatten())
+            tip_shape = self.tip_mlp(X.flatten(), Y.flatten(),t).view(self.kernel_size, self.kernel_size)
             # Erosion followed by dilation
-            eroded = ierosion_mlp(image, self.tip_mlp, self.kernel_size, self.tip_size)
-            reconstructed = idilation_mlp(eroded, self.tip_mlp, self.kernel_size, self.tip_size)
+            eroded = ierosion_mlp(image, self.tip_mlp, self.kernel_size, t)
+            reconstructed = idilation_mlp(eroded, self.tip_mlp, self.kernel_size, t)
 
             # Reconstruction loss (MSE)
             recon_loss = torch.mean((reconstructed - image) ** 2)
+            
+                   
+            # Calculate partial derivatives of tip_shape with respect t
+            dt = torch.autograd.grad(tip_shape.sum(), t, create_graph=True)[0]**2
+            dx = torch.autograd.grad(tip_shape.sum(), X, create_graph=True)[0]**2
+            dy = torch.autograd.grad(tip_shape.sum(), Y, create_graph=True)[0]**2
 
+            dt_loss = torch.sum(dt**2)
+            dx_loss = torch.sum(dx**2)
+            dy_loss = torch.sum(dy**2)
             # Boundary condition loss
-            boundary_heights = self.tip_mlp(X.flatten(), Y.flatten())
-            boundary_loss = torch.mean((boundary_heights - (-100)) ** 2)
+            boundary_heights = self.tip_mlp(X.flatten(), Y.flatten() ,t)
+            boundary_loss = torch.mean((boundary_heights + 100) ** 2)
+            
+            #boundary_heights_reshaped = boundary_heights.view(self.kernel_size, self.kernel_size)
+            #edge_mask = torch.zeros_like(boundary_heights_reshaped, dtype=torch.bool)
+            #edge_mask[0, :] = edge_mask[self.kernel_size-1, :] = edge_mask[:, 0] = edge_mask[:, self.kernel_size-1] = True
+            #edge_values = boundary_heights_reshaped[edge_mask]
+            #boundary_loss = torch.sum((edge_values + 100) ** 2)
 
-            regularization_loss = torch.sum(boundary_heights**2)
-            average_loss = (torch.mean(boundary_heights))**2 
-            #torch.sum((boundary_heights/boundary_heights.min())**2)
-            #min_loss = boundary_heights.min()**2
-
-            #for i in range(self.kernel_size):
-             #   for j in range(self.kernel_size):
-              #      sq =(1+((i-self.kernel_size/2)**2 + (j-self.kernel_size/2)**2))
-               #     regularization_loss += (tip_shape[i, j]  ** 2) / math.sqrt(sq)
-
+            regularization_loss = torch.sum((boundary_heights)**2)
+            centroid_loss = torch.dot(torch.abs(boundary_heights.flatten()), X.flatten())**2 + torch.dot(torch.abs(boundary_heights.flatten()), Y.flatten())**2
+            average_loss = (torch.mean(boundary_heights))**2
+        
             # Height constraint loss
-            height_loss = torch.mean(torch.relu(tip_shape)) + torch.mean((tip_shape.max() ) ** 2) 
+            height_loss = torch.mean(torch.relu(tip_shape)**2)  + torch.mean(tip_shape.max()  ** 2) 
 
             # Combine losses
-            total_loss += recon_loss + self.boundary_weight * boundary_loss + self.height_constraint_weight * height_loss + self.weight_decay * regularization_loss + self.average_weight * average_loss
+            total_loss += (
+                recon_loss
+                + self.boundary_weight * boundary_loss
+                + self.height_constraint_weight * height_loss
+                + self.weight_decay * regularization_loss
+                + self.average_weight * average_loss
+                + self.centroid_weight * centroid_loss
+                #+ self.time_weight * dt_loss
+            )
 
-        return total_loss / batch_size 
+        return total_loss / batch_size
           
 # Usage example
 def Tip_mlp(
-        dataloder,num_epochs, lr, kernel_size, tip_size, boundary_weight,
-        height_constraint_weight, weight_decay, average_weight, n_hidden_layers,n_nodes,device):
-    tip_mlp = TipShapeMLP(n_size=kernel_size, n_hidden_layers=n_hidden_layers,
-                        n_nodes=n_nodes).to(device)
-    criterion = BTRLoss(tip_mlp, kernel_size=kernel_size, tip_size=tip_size, 
-                        boundary_weight=boundary_weight, weight_decay=weight_decay,
-                        height_constraint_weight=height_constraint_weight, average_weight=average_weight).to(device)
-    optimizer = torch.optim.Adam(tip_mlp.parameters(), lr)
+        dataloader,
+        num_epochs,
+        lr,
+        kernel_size,
+        boundary_weight,
+        height_constraint_weight,
+        weight_decay,
+        average_weight,
+        centroid_weight,
+        n_hidden_layers,
+        n_nodes,
+        device
+):
+    # Initialize the TipShapeMLP model
+    tip_mlp = TipShapeMLP(
+        n_size=kernel_size,
+        n_hidden_layers=n_hidden_layers,
+        n_nodes=n_nodes
+    ).to(device)
+
+    # Initialize the BTRLoss criterion
+    criterion = BTRLoss(
+        tip_mlp,
+        kernel_size=kernel_size,
+        boundary_weight=boundary_weight,
+        weight_decay=weight_decay,
+        height_constraint_weight=height_constraint_weight,
+        average_weight=average_weight,
+        centroid_weight=centroid_weight
+    ).to(device)
+
+    # Initialize the optimizer
+    optimizer = torch.optim.Adam(tip_mlp.parameters(), lr=lr)
 
 # Training loop
     loss_train = []
     loss_train_recon = []
     for epoch in range(num_epochs):
-            for batch in dataloder:
+            for batch in dataloader:
+                n=0.0
                 optimizer.zero_grad()
-                loss = criterion(batch)
+                loss = criterion(batch,n)
                 loss.backward()
                 optimizer.step()
+                n+=n+1.0
             loss_train.append(loss)
-
-
-    tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size, tip_size=tip_size, device=device)
+  
+    t_scalar= torch.tensor(3.0, dtype=torch.float32).to(device)
+    t = t_scalar.expand(kernel_size*kernel_size)
+    tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size, t=t, device=device)
     tip_estimate = tip.detach()
     return loss_train, tip_estimate
+
+
+
+
+
 
