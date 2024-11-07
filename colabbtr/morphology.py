@@ -546,8 +546,8 @@ class BTRLoss(nn.Module):
                 + self.height_constraint_weight * height_loss
                 + self.weight_decay * regularization_loss
                 + self.average_weight * average_loss
-                + self.centroid_weight * centroid_loss
-                #+ self.time_weight * dt_loss
+                + self.centroid_weight * dx_loss
+                #+ self.time_weight * dx_loss
             )
 
         return total_loss / batch_size
@@ -606,7 +606,55 @@ def Tip_mlp(
     tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size, t=t, device=device)
     tip_estimate = tip.detach()
     return loss_train, tip_estimate
+######################################################################################
+#molecular surface
+######################################################################################
+class SurfaceMLP(nn.Module):
+    def __init__(self,n_hidden_layers,n_nodes):
+        super().__init__()
+        n_input = 3
+        n_output = 1
 
+        self.l_in = nn.Sequential(
+            nn.Linear(n_input,n_nodes),
+            nn.ReLU()
+        )
+
+        layers=[]
+        for i in range(0,n_hidden_layers):
+            layers.extend(nn.Sequential(
+            nn.Linear(n_nodes,n_nodes),
+            nn.ReLU()
+            ))
+        self.l_hidden = nn.Sequential(*layers)
+
+        self.l_out = nn.Linear(n_nodes,n_output)
+
+        self.n_hidden = n_hidden_layers
+        
+
+    def forward(self, x, y, t):
+
+        xyt = torch.stack((x, y, t), dim=1).to(x.device)
+        xyt2 = self.l_in(xyt)
+        xyt3 = self.l_hidden(xyt2)
+        xyt4 = self.l_out(xyt3)
+        surface = xyt4
+        return surface
+
+def generate_surface_from_mlp(surface_mlp, x, y, t, device):
+    
+    if device is None:
+        device = next(surface_mlp.parameters()).device
+
+    X, Y = torch.meshgrid(x, y, indexing='ij')
+
+    with torch.set_grad_enabled(surface_mlp.training):
+        surface = surface_mlp(X.flatten(), Y.flatten(), t).view(x.size(), y.size())
+    return surface
+
+
+class SurfaceLoss(nn.Module):
 
 
 
