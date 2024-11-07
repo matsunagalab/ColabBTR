@@ -546,8 +546,8 @@ class BTRLoss(nn.Module):
                 + self.height_constraint_weight * height_loss
                 + self.weight_decay * regularization_loss
                 + self.average_weight * average_loss
-                + self.centroid_weight * dx_loss
-                #+ self.time_weight * dx_loss
+                + self.centroid_weight * centroid_loss
+                #+ self.time_weight * dt_loss
             )
 
         return total_loss / batch_size
