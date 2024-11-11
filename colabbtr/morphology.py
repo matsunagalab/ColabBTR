@@ -414,7 +414,7 @@ class TipShapeMLP(nn.Module):
 
     def forward(self, x, y, t):
 
-        xyt = torch.stack((x, y,t), dim=1).to(x.device)
+        xyt = torch.stack((y,x,t), dim=1).to(x.device)
         xyt2 = self.l_in(xyt)
         xyt3 = self.l_hidden(xyt2)
         xyt4 = self.l_out(xyt3)
@@ -499,7 +499,6 @@ class BTRLoss(nn.Module):
         y = torch.linspace(-self.kernel_size/2, self.kernel_size/2, self.kernel_size, device=images.device,requires_grad=True)
         
         X, Y = torch.meshgrid(x, y, indexing='ij')
-        
 
         for i in range(batch_size):
             image = images[i]
@@ -655,8 +654,33 @@ def generate_surface_from_mlp(surface_mlp, x, y, t, device):
 
 
 class SurfaceLoss(nn.Module):
+    def __init__(self, surface_mlp):
+        super().__init__()
+        self.surface_mlp = surface_mlp
 
+    def forward(self, images):
+        batch_size = images.shape[0]
+        y_size  =  images.shape[1]
+        x_size  =  images.shape[2]
+        total_loss = 0.0
 
+        # Generate surface_mlp input
+        x = torch.linspace(-self.x_size/2, self.x_size/2, self.x_size, device=images.device,requires_grad=True)
+        y = torch.linspace(-self.y_size/2, self.y_size/2, self.y_size, device=images.device,requires_grad=True)
+        X, Y = torch.meshgrid(x, y, indexing='ij')
+        t = []
+        
+        for i in range(y_size/2):
+            t.append(torch.linspace(2*i, 2*i+(x_size-1), self.x_size, device=images.device,requires_grad=True))
+            t.append(torch.linspace(2*i+(2*x_size-1), 2*i+x_size, self.x_size, device=images.device,requires_grad=True))
+        t = t/x_size*y_size
 
+        for i in range(batch_size):
+            T = i + t
+            surface = self.surface_mlp( X.flatten(), Y.flatten(), T.flatten())
 
+            total_loss += surface        
+        return total_loss/batch_size
 
+#def surface_mlp():
+        
