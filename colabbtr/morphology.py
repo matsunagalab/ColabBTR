@@ -710,7 +710,7 @@ def surface_reconstruct(dataloader,n_hidden_layers,n_nodes,lr,num_epochs,num_fra
     for frame in range(num_frame):
         t_scalar = torch.tensor(frame, dtype=torch.float32, requires_grad=True).to(batch.device)
         t = t_scalar.expand_as(X.flatten())
-        surface_estimate.append(generate_surface_from_mlp(surface_mlp,X.flatten(),y.flatten(),t))
+        surface_estimate.append(generate_surface_from_mlp(surface_mlp,X.flatten(),y.flatten(),t).view(x.size(), y.size()))
     
     return surface_estimate ,loss_train
         
