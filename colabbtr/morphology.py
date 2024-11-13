@@ -1,3 +1,4 @@
+from tkinter import N
 import torch
 import math
 import torch.nn as nn
@@ -589,7 +590,6 @@ def Tip_mlp(
 
 # Training loop
     loss_train = []
-    loss_train_recon = []
     for epoch in range(num_epochs):
             for batch in dataloader:
                 n=0.0
@@ -604,7 +604,7 @@ def Tip_mlp(
     t = t_scalar.expand(kernel_size*kernel_size)
     tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size, t=t, device=device)
     tip_estimate = tip.detach()
-    return loss_train, tip_estimate
+    return tip_estimate, loss_train
 ######################################################################################
 #molecular surface
 ######################################################################################
@@ -682,5 +682,35 @@ class SurfaceLoss(nn.Module):
             total_loss += surface        
         return total_loss/batch_size
 
-#def surface_mlp():
+def surface_reconstruct(dataloader,n_hidden_layers,n_nodes,lr,num_epochs,num_frame):
+    surface_mlp = SurfaceMLP(n_hidden_layers=n_hidden_layers,n_nodes=n_nodes)
+
+    criterion = SurfaceLoss(surface_mlp)
+
+    # Initialize the optimizer
+    optimizer = torch.optim.Adam(surface_mlp.parameters(), lr=lr)
+
+    # Training loop
+    loss_train = []
+    for epoch in range(num_epochs):
+            for batch in dataloader:
+                optimizer.zero_grad()
+                loss = criterion(batch)
+                loss.backward()
+                optimizer.step()
+            loss_train.append(loss)
+    x_size = batch.shape[2]
+    y_size  = batch.shape[1]
+    x = torch.linspace(-x_size/2, x_size/2, x_size, device=batch.device,requires_grad=True)
+    y = torch.linspace(-y_size/2, y_size/2, y_size, device=batch.device,requires_grad=True)
+    X, Y = torch.meshgrid(x, y, indexing='ij')
+    
+    surface_estimate = []
+
+    for frame in range(num_frame):
+        t_scalar = torch.tensor(frame, dtype=torch.float32, requires_grad=True).to(batch.device)
+        t = t_scalar.expand_as(X.flatten())
+        surface_estimate.append(generate_surface_from_mlp(surface_mlp,X.flatten(),y.flatten(),t))
+    
+    return surface_estimate ,loss_train
         
