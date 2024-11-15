@@ -663,7 +663,7 @@ def generate_surface_from_mlp(surface_mlp, x, y, t, device):
     X, Y = torch.meshgrid(x, y, indexing='ij')
 
     with torch.set_grad_enabled(surface_mlp.training):
-        surface = surface_mlp(X.flatten(), Y.flatten(), t).view(x.size(), y.size())
+        surface = surface_mlp(X.flatten(), Y.flatten(), t.flatten()).view(x.shape[0], y.shape[0])
     return surface
 
 
@@ -680,17 +680,17 @@ class SurfaceLoss(nn.Module):
         total_loss = 0.0
 
         # Generate surface_mlp input
-        x = torch.linspace(-self.x_size/2, self.x_size/2, self.x_size, device=images.device,requires_grad=True)
-        y = torch.linspace(-self.y_size/2, self.y_size/2, self.y_size, device=images.device,requires_grad=True)
+        x = torch.linspace(-x_size/2, x_size/2, x_size, device=images.device,requires_grad=True)
+        y = torch.linspace(-y_size/2, y_size/2, y_size, device=images.device,requires_grad=True)
         X, Y = torch.meshgrid(x, y, indexing='ij')
 
         t = torch.empty(0, x_size).to(device=images.device)
-        for i in range(y_size/2):
-            t = torch.cat([t, torch.linspace(2*i*x_size, 2*i*x_size+x_size-1, self.x_size, device=images.device,requires_grad=True).unsqueeze(0)], dim=0)
-            t = torch.cat([t, torch.linspace(2*i*x_size, 2*i*x_size+x_size-1, self.x_size, device=images.device,requires_grad=True).unsqueeze(0)], dim=0)
+        for i in range(y_size//2):
+            t = torch.cat([t, torch.linspace(2*i*x_size, (2*i+1)*x_size-1, x_size, device=images.device,requires_grad=True).unsqueeze(0)], dim=0)
+            t = torch.cat([t, torch.linspace((2*i+2)*x_size-1, (2*i+1)*x_size, x_size, device=images.device,requires_grad=True).unsqueeze(0)], dim=0)
         t = t/x_size*y_size
 
-        t_recon = torch.zeros(y_size,x_size,requires_grad=True)
+        t_recon = torch.zeros(y_size,x_size,requires_grad=True).to(images.device)
 
         for i in range(batch_size):
             image = images[i]
@@ -712,16 +712,16 @@ class SurfaceLoss(nn.Module):
             ddx_recon = torch.autograd.grad(dx_recon.sum(), X, create_graph=True)[0]
             ddy_recon = torch.autograd.grad(dy_recon.sum(), Y, create_graph=True)[0]
 
-            diffusion_loss = (dt - self.diffusion_weight*(ddx + ddy))**2 + (dt_recon - self.diffusion_weight*(ddx_recon+ddy_recon))**2
-            boundary_loss =  (image - surface)**2 
-            total_loss += diffusion_loss + boundary_loss
+            diffusion_loss = torch.mean((dt - self.diffusion_weight*(ddx + ddy))**2 + (dt_recon - self.diffusion_weight*(ddx_recon+ddy_recon))**2)
+            boundary_loss =  torch.mean((image - surface_recon.view(y.shape[0], x.shape[0]))**2)
+            total_loss += boundary_loss
 
         return total_loss/batch_size
 
-def surface_reconstruct(dataloader,n_hidden_layers,n_nodes,lr,num_epochs,num_frame,device):
-    surface_mlp = SurfaceMLP(n_hidden_layers=n_hidden_layers,n_nodes=n_nodes)
+def surface_reconstruct(dataloader,n_hidden_layers,n_nodes,lr,num_epochs,num_frame,diffusion_weight,device):
+    surface_mlp = SurfaceMLP(n_hidden_layers=n_hidden_layers,n_nodes=n_nodes).to(device)
 
-    criterion = SurfaceLoss(surface_mlp)
+    criterion = SurfaceLoss(surface_mlp,diffusion_weight).to(device)
 
     # Initialize the optimizer
     optimizer = torch.optim.Adam(surface_mlp.parameters(), lr=lr)
@@ -736,19 +736,18 @@ def surface_reconstruct(dataloader,n_hidden_layers,n_nodes,lr,num_epochs,num_fra
                 loss.backward()
                 optimizer.step()
                 n+=n+1.0
-            loss_train.append(loss)
+            loss_train.append(loss.item())
 
     x_size = batch.shape[2]
     y_size  = batch.shape[1]
-    x = torch.linspace(-x_size/2, x_size/2, x_size, device=device,requires_grad=True)
-    y = torch.linspace(-y_size/2, y_size/2, y_size, device=device,requires_grad=True)
-    X, Y = torch.meshgrid(x, y, indexing='ij')
-    
+    x = torch.linspace(-x_size/2, x_size/2, x_size, device=device)
+    y = torch.linspace(-y_size/2, y_size/2, y_size, device=device)
+
     surface_estimate = torch.empty(0, y_size, x_size).to(device)
 
     for frame in range(num_frame):
-        t = torch.zeros(y_size,x_size) + frame
-        surface = generate_surface_from_mlp(surface_mlp, X.flatten(), Y.flatten(), t, device)
+        t = torch.zeros(y_size,x_size,device=device) + frame
+        surface = generate_surface_from_mlp(surface_mlp, x, y, t, device)
         surface_estimate = torch.cat([surface_estimate, surface.unsqueeze(0)], dim=0)
 
     surface_estimate = surface_estimate.detach()
