@@ -25,7 +25,6 @@ https://doi.org/10.1038/s41598-022-27057-2
 ```
 
 ## Contact
-
 If you have any questions or troubles, feel free to create GitHub issues, or send email to us.
 
 Yasuhiro Matsunaga
