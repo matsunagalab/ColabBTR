@@ -206,6 +206,11 @@ def surfing(xyz, radius, config:dict[str, float]):
                 config (dict)
         Output: z_stage (tensor of size (*, len(y_stage), len(x_stage))
     """
+    # Place molecule on the AFM stage: shift z so that min(z) = 0
+    z_min = xyz[..., 2].min(dim=-1, keepdim=True)[0]  # (*, 1)
+    xyz = xyz.clone()
+    xyz[..., 2] = xyz[..., 2] - z_min
+
     radius2 = radius**2
     x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"], dtype=xyz.dtype, device=xyz.device) + 0.5*config["resolution_x"] #(W,)
     y_stage = torch.arange(config["min_y"], config["max_y"], config["resolution_y"], dtype=xyz.dtype, device=xyz.device) + 0.5*config["resolution_y"] #(H,)
@@ -232,6 +237,9 @@ def surfing_old(xyz, radius, config):
         Output: z_stage (tensor of size (len(y_stage), len(x_stage))
     """
     device = xyz.device
+    # Place molecule on the AFM stage: shift z so that min(z) = 0
+    xyz = xyz.clone()
+    xyz[:, 2] = xyz[:, 2] - xyz[:, 2].min()
     radius2 = radius**2
     x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"]) + 0.5*config["resolution_x"]
     y_stage = torch.arange(config["min_y"], config["max_y"], config["resolution_y"]) + 0.5*config["resolution_y"]
