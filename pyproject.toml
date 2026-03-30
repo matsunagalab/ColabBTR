@@ -31,8 +31,6 @@ notebook = [
     "gwyfile",
     "plotly",
     "scikit-learn",
-    "gdown",
-    "spmpy @ git+https://github.com/kogens/spmpy",
     "jupyter",
     "ipywidgets",
 ]
