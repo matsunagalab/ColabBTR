@@ -2,6 +2,13 @@
 
 Workflow: define_tip → surfing + idilation → differentiable_btr → pixel_rmsd evaluation
 Uses PDB 3A5I with random rotations to generate synthetic AFM images.
+
+Test parameters are chosen so that:
+  - Resolution is 1.0 nm/pixel (typical for high-speed AFM).
+  - The AFM image is large enough for the molecule to sit well inside
+    (molecule ~±5 nm, image ±15 nm → ~10 nm margin on each side).
+  - The tip is narrow relative to its pixel array so that edge values
+    are deeply negative (~-28), avoiding boundary artifacts.
 """
 
 import os
@@ -43,8 +50,10 @@ def molecular_data(pdb_path):
 
 @pytest.fixture(scope="module")
 def ground_truth_tip():
-    tip = torch.zeros(10, 10)
-    tip = define_tip(tip, resolution_x=1.0, resolution_y=1.0, probeRadius=5.0, probeAngle=0.3)
+    # 15x15 pixels at 1.0 nm/pixel → 7 nm physical half-width
+    # probeRadius=2.0 nm: tip is narrow, edge values ≈ -28
+    tip = torch.zeros(15, 15)
+    tip = define_tip(tip, resolution_x=1.0, resolution_y=1.0, probeRadius=2.0, probeAngle=0.3)
     return tip
 
 
@@ -58,10 +67,12 @@ def synthetic_images(molecular_data, ground_truth_tip):
     rotations = Rotation.random(nframe, random_state=42)
     rot_matrices = torch.tensor(rotations.as_matrix(), dtype=torch.float32)
 
+    # 1.0 nm/pixel, image covers ±15 nm → 30x30 pixels
+    # Molecule extent ~±5 nm → ~10 nm margin on each side
     config = {
-        "min_x": -5.0, "max_x": 5.0,
-        "min_y": -5.0, "max_y": 5.0,
-        "resolution_x": 0.5, "resolution_y": 0.5,
+        "min_x": -15.0, "max_x": 15.0,
+        "min_y": -15.0, "max_y": 15.0,
+        "resolution_x": 1.0, "resolution_y": 1.0,
     }
 
     images = []
