@@ -47,7 +47,7 @@ from colabbtr.morphology import (
 xyz, radii = load_pdb_ca("data/3A5I.pdb")  # xyz: (N, 3) in nm, radii: (N,) in nm
 xyz = xyz - xyz.mean(dim=0, keepdim=True)   # center the molecule
 
-# 2. Define a conical probe tip (15x15 pixels, 1.0 nm/pixel)
+# 2. Define a conical probe tip (15x15 pixels, 1.0 nm/pixel, half-cone angle 0.3 rad)
 tip = define_tip(torch.zeros(15, 15), resolution_x=1.0, resolution_y=1.0,
                  probeRadius=2.0, probeAngle=0.3)
 

@@ -480,12 +480,12 @@ Atom2Radius = {
 
 def define_tip(tip, resolution_x, resolution_y, probeRadius, probeAngle):
     """
-    Define the tip shape by the probe radius and angle
+    Define the tip shape by the probe radius and half-cone angle
         Input: tip (tensor of size (tip_height, tip_width))
-               resolution_x (float)
-               resolution_y (float)
-               probeRadius (float)
-               probeAngle (float)
+               resolution_x (float) — pixel size in nm
+               resolution_y (float) — pixel size in nm
+               probeRadius (float) — tip apex radius in nm
+               probeAngle (float) — half-cone angle in radians
         Output: tip (tensor of size (tip_height, tip_width))
     """
     tip_xsiz, tip_ysiz = tip.shape
