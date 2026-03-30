@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 import math
 import torch.nn as nn
@@ -196,6 +197,123 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, i
 
     tip_estimate = tip.detach()
     return tip_estimate, loss_train
+
+def _select_lambda_1se(lambdas, loss_mean, loss_std):
+    """
+    Apply the one-standard-error rule with linear interpolation.
+    Selects the largest lambda whose mean CV loss is within one standard error
+    of the minimum, refined by linear interpolation between adjacent grid points.
+
+        Input:
+            lambdas (array-like) — lambda values (sorted ascending)
+            loss_mean (array-like) — mean CV loss for each lambda
+            loss_std (array-like) — std of CV loss for each lambda
+        Output:
+            lambda_opt (float)
+    """
+    lambdas = np.asarray(lambdas, dtype=float)
+    loss_mean = np.asarray(loss_mean, dtype=float)
+    loss_std = np.asarray(loss_std, dtype=float)
+    n = len(lambdas)
+
+    if n == 1:
+        return float(lambdas[0])
+
+    imin = int(np.argmin(loss_mean))
+    threshold = loss_mean[imin] + loss_std[imin]
+
+    candidates = np.where(loss_mean <= threshold)[0]
+    imin_1se = int(np.max(candidates))
+
+    # Edge case: 1SE index is the last lambda — no interpolation possible
+    if imin_1se >= n - 1:
+        return float(lambdas[-1])
+
+    # Linear interpolation between imin_1se and imin_1se+1
+    denom = loss_mean[imin_1se + 1] - loss_mean[imin_1se]
+    if abs(denom) < 1e-30:
+        return float(lambdas[imin_1se])
+
+    frac = (threshold - loss_mean[imin_1se]) / denom
+    return float(lambdas[imin_1se] + (lambdas[imin_1se + 1] - lambdas[imin_1se]) * frac)
+
+def cross_validate_lambda(images, tip_size, lambda_min=1e-4, lambda_max=0.1, lambda_num=5,
+                          n_folds=5, nepoch=100, lr=0.1, is_tqdm=True):
+    """
+    Find the optimal regularization parameter (weight_decay) for differentiable BTR
+    using k-fold cross-validation with the one-standard-error rule.
+
+        Input:
+            images (tensor of size (nframe, image_height, image_width))
+            tip_size (2d tuple) — tip dimensions (tip_height, tip_width)
+            lambda_min (float) — minimum lambda
+            lambda_max (float) — maximum lambda
+            lambda_num (int) — number of lambda values (log-spaced)
+            n_folds (int) — number of CV folds (default 5)
+            nepoch (int) — training epochs per fold
+            lr (float) — learning rate for AdamW
+            is_tqdm (bool) — show progress bar for lambda loop
+        Output:
+            optimal_lambda (float) — selected lambda by one-standard-error rule
+            cv_result (dict) — keys: lambdas, loss_mean, loss_std, lambda_min_idx, lambda_1se_idx
+    """
+    n_samples = images.shape[0]
+    if n_samples < n_folds:
+        raise ValueError(f"Need at least {n_folds} images for {n_folds}-fold CV, got {n_samples}")
+    if lambda_num < 1:
+        raise ValueError("lambda_num must be >= 1")
+    if lambda_min <= 0 or lambda_max <= 0:
+        raise ValueError("lambda_min and lambda_max must be positive")
+    if lambda_min >= lambda_max:
+        raise ValueError("lambda_min must be less than lambda_max")
+
+    lambdas = np.logspace(np.log10(lambda_min), np.log10(lambda_max), lambda_num)
+    fold_size = n_samples // n_folds
+
+    loss_means = []
+    loss_stds = []
+    for lam in tqdm(lambdas, desc='Evaluating lambdas', disable=not is_tqdm):
+        cv_losses = []
+        for fold in range(n_folds):
+            val_start = fold * fold_size
+            val_end = (fold + 1) * fold_size if fold < n_folds - 1 else n_samples
+
+            train_indices = list(range(0, val_start)) + list(range(val_end, n_samples))
+            train_data = images[train_indices]
+            val_data = images[val_start:val_end]
+
+            tip, _ = differentiable_btr(train_data, tip_size,
+                                        nepoch=nepoch, lr=lr, weight_decay=lam, is_tqdm=False)
+
+            with torch.no_grad():
+                val_loss = 0.0
+                for i in range(val_data.shape[0]):
+                    image = val_data[i, :, :]
+                    image_reconstructed = idilation(ierosion(image, tip), tip)
+                    val_loss += torch.mean((image_reconstructed - image) ** 2).item()
+            cv_losses.append(val_loss)
+
+        loss_means.append(float(np.mean(cv_losses)))
+        loss_stds.append(float(np.std(cv_losses)))
+
+    loss_mean_arr = np.array(loss_means)
+    loss_std_arr = np.array(loss_stds)
+
+    imin = int(np.argmin(loss_mean_arr))
+    threshold = loss_mean_arr[imin] + loss_std_arr[imin]
+    candidates = np.where(loss_mean_arr <= threshold)[0]
+    imin_1se = int(np.max(candidates))
+
+    optimal_lambda = _select_lambda_1se(lambdas, loss_means, loss_stds)
+
+    cv_result = {
+        'lambdas': lambdas,
+        'loss_mean': loss_means,
+        'loss_std': loss_stds,
+        'lambda_min_idx': imin,
+        'lambda_1se_idx': imin_1se,
+    }
+    return optimal_lambda, cv_result
 
 @torch.jit.script
 def surfing(xyz, radius, config:dict[str, float], shift_z: bool = True):
