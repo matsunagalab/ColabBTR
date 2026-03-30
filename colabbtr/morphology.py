@@ -1,4 +1,3 @@
-from tkinter import N
 import torch
 import math
 import torch.nn as nn
@@ -20,12 +19,12 @@ def compute_xc_yc(tip):
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
 @torch.jit.script
-def fixed_padding(inputs, kernel_size, dilation):
+def fixed_padding(inputs, kernel_size, dilation, pad_value: float = 0.0):
     kernel_size_effective = kernel_size + (kernel_size - 1) * (dilation - 1)
     pad_total = kernel_size_effective - 1
     pad_beg:int = int(pad_total // 2)
     pad_end:int = int(pad_total - pad_beg)
-    padded_inputs = F.pad(inputs, (pad_beg, pad_end, pad_beg, pad_end))
+    padded_inputs = F.pad(inputs, (pad_beg, pad_end, pad_beg, pad_end), value=pad_value)
     return padded_inputs
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
@@ -39,24 +38,20 @@ def idilation(image, tip):
                 where image_heigh is equal to surface_height
                       image_width is equal to surface_width
     """
-    in_channels = 1
-    out_channels = 1
     H, W = image.shape
     kernel_size, _ = tip.shape
     x = image.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1))
+    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1), pad_value=float('-inf'))
     x = F.unfold(x, kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
     L = x.size(-1)
-    #L_sqrt = int(math.sqrt(L))
 
     weight = tip.unsqueeze(0).unsqueeze(0)  # (1, 1, kH, kW)
-    weight = weight.view(out_channels, -1) # (Cout, Cin*kH*kW)
+    weight = weight.view(1, -1) # (Cout, Cin*kH*kW)
     weight = weight.unsqueeze(0).unsqueeze(-1)  # (1, Cout, Cin*kH*kW, 1)
     x = weight + x # (B, Cout, Cin*kH*kW, L)
     x, _ = torch.max(x, dim=2, keepdim=False) # (B, Cout, L)
-    #x = x.view(-1, out_channels, L_sqrt, L_sqrt)  # (B, Cout, L/2, L/2)
-    x = x.view(-1, out_channels, H, W)  # (B, Cout, H, W)
+    x = x.view(-1, 1, H, W)  # (B, Cout, H, W)
     return x.squeeze(0).squeeze(0)
 
 # ref: https://github.com/lc82111/pytorch_morphological_dilation2d_erosion2d/blob/master/morphology.py
@@ -68,26 +63,21 @@ def ierosion(surface, tip):
                tip (tensor of size (kernel_size, kernel_size)
         Output: r (tensor of size (image_height, image_width)
     """
-    in_channels = 1
-    out_channels = 1
     kernel_size, _ = tip.shape
     H, W = surface.shape
     x = surface.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1))
+    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1), pad_value=float('inf'))
     x = F.unfold(x, kernel_size, dilation=1, padding=0, stride=1)  # (B, Cin*kH*kW, L), where L is the numbers of patches
-    # x = unfold(x)  # (B, Cin*kH*kW, L), where L is the numbers of patches
     x = x.unsqueeze(1) # (B, 1, Cin*kH*kW, L)
     L = x.size(-1)
-    #L_sqrt = int(math.sqrt(L))
 
     weight = tip.unsqueeze(0).unsqueeze(0)  # (1, 1, kH, kW)
-    weight = weight.view(out_channels, -1) # (Cout, Cin*kH*kW)
+    weight = weight.view(1, -1) # (Cout, Cin*kH*kW)
     weight = weight.unsqueeze(0).unsqueeze(-1)  # (1, Cout, Cin*kH*kW, 1)
     x = weight - x # (B, Cout, Cin*kH*kW, L)
     x, _ = torch.max(x, dim=2, keepdim=False) # (B, Cout, L)
     x = -1 * x
-    #x = x.view(-1, out_channels, L_sqrt, L_sqrt)  # (B, Cout, L/2, L/2)
-    x = x.view(-1, out_channels, H, W)  # (B, Cout, H, W)
+    x = x.view(-1, 1, H, W)  # (B, Cout, H, W)
     return x.squeeze(0).squeeze(0)
 
 def idilation_old(surface, tip):
@@ -142,7 +132,6 @@ def translate_tip_mean(P, cutoff=10**(-8)):
 
     p_min = torch.min(P)
     weight = P - p_min
-    weight = weight
 
     id = weight < cutoff
     weight[id] = 0.0
@@ -289,7 +278,7 @@ Atom2Radius = {
     "CG2": 0.170,
     "CG3": 0.170,
     "CD": 0.170,
-    "CD1": 1.70,
+    "CD1": 0.170,
     "CD2": 0.170,
     "CD3": 0.170,
     "CZ": 0.170,
@@ -618,7 +607,7 @@ def Tip_mlp(
                 loss = criterion(batch,n,xc,yc)
                 loss.backward()
                 optimizer.step()
-                n+=n+1.0
+                n += 1.0
                 with torch.no_grad():
                     if epoch%25==0 and loss.item()>100:
                         tip = generate_tip_from_mlp(tip_mlp, kernel_size=kernel_size,xc=xc, yc=yc,t=t ,device=device)
@@ -760,7 +749,7 @@ def surface_reconstruct(dataloader,n_hidden_layers,n_nodes,lr,num_epochs,num_fra
                 loss = criterion(batch,n)
                 loss.backward()
                 optimizer.step()
-                n+=n+1.0
+                n += 1.0
             loss_train.append(loss.item())
 
     x_size = batch.shape[2]
