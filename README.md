@@ -34,6 +34,7 @@ pip install git+https://github.com/matsunagalab/ColabBTR
 
 ```python
 import torch
+from scipy.spatial.transform import Rotation
 from colabbtr.morphology import (
     load_pdb_ca, define_tip, surfing, idilation, ierosion, differentiable_btr,
 )
@@ -46,28 +47,51 @@ xyz = xyz - xyz.mean(dim=0, keepdim=True)   # center the molecule
 tip = define_tip(torch.zeros(15, 15), resolution_x=1.0, resolution_y=1.0,
                  probeRadius=2.0, probeAngle=0.3)
 
-# 3. Compute molecular surface and simulate AFM images
+# 3. Compute molecular surfaces and simulate AFM images (20 frames)
 config = {
     "min_x": -15.0, "max_x": 15.0,
     "min_y": -15.0, "max_y": 15.0,
     "resolution_x": 1.0, "resolution_y": 1.0,
 }
-nframe = 5
-images = []
+nframe = 20
+surfaces, images = [], []
 for _ in range(nframe):
-    # random rotation of the molecule
-    R, _ = torch.linalg.qr(torch.randn(3, 3))
+    R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
     xyz_rot = xyz @ R.T
     surface = surfing(xyz_rot, radii, config)        # (H, W) molecular surface
     image = idilation(surface.double(), tip.double()) # (H, W) simulated AFM image
+    surfaces.append(surface)
     images.append(image)
-images = torch.stack(images)  # (nframe, H, W)
+surfaces = torch.stack(surfaces)  # (nframe, H, W)
+images = torch.stack(images)      # (nframe, H, W)
 
-# 4. Reconstruct tip shape from AFM images via BTR
-tip_est, loss = differentiable_btr(images, tip_size=(15, 15), nepoch=200, lr=0.1)
+# 4. Reconstruct tip shape from AFM images via BTR (200 epochs)
+tip_est, loss = differentiable_btr(
+    images, tip_size=(15, 15), nepoch=200, lr=0.1, weight_decay=0.001,
+)
 
-# 5. Deconvolve: remove tip artifacts to recover the sample surface
-surface_recovered = ierosion(images[0], tip_est)
+# 5. Deconvolve: remove tip artifacts to recover the sample surfaces
+surfaces_recovered = torch.stack([ierosion(images[i], tip_est) for i in range(nframe)])
+```
+
+### Save results as ASD files
+
+```python
+import libasd
+import numpy as np
+
+# Scanning range (nm) = pixel count × resolution (nm/pixel)
+x_range = images.shape[2]  # 30 pixels × 1.0 nm/pixel = 30 nm
+y_range = images.shape[1]  # 30 pixels × 1.0 nm/pixel = 30 nm
+
+libasd.write_asd("images.asd", images.numpy(), x_scanning_range=x_range, y_scanning_range=y_range)
+libasd.write_asd("surfaces.asd", surfaces.numpy(), x_scanning_range=x_range, y_scanning_range=y_range)
+libasd.write_asd("surfaces_recovered.asd", surfaces_recovered.numpy(), x_scanning_range=x_range, y_scanning_range=y_range)
+
+# Tip shape (single frame)
+tip_range = tip.shape[1]  # 15 pixels × 1.0 nm/pixel = 15 nm
+libasd.write_asd("tip.asd", tip.numpy(), x_scanning_range=tip_range, y_scanning_range=tip_range)
+libasd.write_asd("tip_est.asd", tip_est.numpy(), x_scanning_range=tip_range, y_scanning_range=tip_range)
 ```
 
 ### Run the Colab notebook locally

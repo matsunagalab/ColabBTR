@@ -2116,7 +2116,7 @@ wheels = [
 [[package]]
 name = "libasd"
 version = "1.5.6"
-source = { git = "https://github.com/matsunagalab/libasd#b69a871f3e1d5d958f6903b3b76e458822c675e6" }
+source = { git = "https://github.com/matsunagalab/libasd#f18164f79ba300efcdaa49b706a821739da9e054" }
 dependencies = [
     { name = "cmake" },
     { name = "wheel" },
