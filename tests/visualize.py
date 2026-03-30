@@ -124,21 +124,36 @@ def visualize_btr():
         images, tip_size=tip_gt.shape, nepoch=200, lr=0.1, weight_decay=0.001, is_tqdm=True,
     )
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    tip_gt_np = tip_gt.numpy()
+    tip_est_np = tip_est.numpy()
+    vmin = min(tip_gt_np.min(), tip_est_np.min())
+    vmax = max(tip_gt_np.max(), tip_est_np.max())
 
-    im0 = axes[0].imshow(tip_gt.numpy(), cmap=CMAP, aspect="equal", interpolation="none")
+    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
+
+    im0 = axes[0].imshow(tip_gt_np, cmap=CMAP, aspect="equal", interpolation="none", vmin=vmin, vmax=vmax)
     axes[0].set_title("Ground truth tip")
     plt.colorbar(im0, ax=axes[0], label="nm")
 
-    im1 = axes[1].imshow(tip_est.numpy(), cmap=CMAP, aspect="equal", interpolation="none")
+    im1 = axes[1].imshow(tip_est_np, cmap=CMAP, aspect="equal", interpolation="none", vmin=vmin, vmax=vmax)
     axes[1].set_title("Reconstructed tip (BTR)")
     plt.colorbar(im1, ax=axes[1], label="nm")
 
-    axes[2].plot(loss_train)
-    axes[2].set_title("Training loss")
-    axes[2].set_xlabel("Epoch")
-    axes[2].set_ylabel("MSE")
-    axes[2].set_yscale("log")
+    # Cross-section comparison through the center
+    center = tip_gt_np.shape[0] // 2
+    pixels = np.arange(tip_gt_np.shape[1])
+    axes[2].plot(pixels, tip_gt_np[center, :], "o-", label="Ground truth", markersize=4)
+    axes[2].plot(pixels, tip_est_np[center, :], "s-", label="Reconstructed", markersize=4)
+    axes[2].set_title("Cross-section (center row)")
+    axes[2].set_xlabel("pixel")
+    axes[2].set_ylabel("height (nm)")
+    axes[2].legend()
+
+    axes[3].plot(loss_train)
+    axes[3].set_title("Training loss")
+    axes[3].set_xlabel("Epoch")
+    axes[3].set_ylabel("MSE")
+    axes[3].set_yscale("log")
 
     path = os.path.join(OUTPUT_DIR, "vis_btr.png")
     fig.savefig(path, dpi=150, bbox_inches="tight")

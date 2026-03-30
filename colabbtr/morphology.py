@@ -198,18 +198,21 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, i
     return tip_estimate, loss_train
 
 @torch.jit.script
-def surfing(xyz, radius, config:dict[str, float]):
+def surfing(xyz, radius, config:dict[str, float], shift_z: bool = True):
     """
     Compute the maximum height (z-value) of molecular surface at grid points on AFM stage (where z=0)
         Input: xyz (tensor of size (*, N, 3))
                 radius (tensor of size (N,))
                 config (dict)
+                shift_z (bool) — if True (default), shift z so that min(z) = 0.
+                    Set to False for MD simulation data where molecules are already on the AFM stage.
         Output: z_stage (tensor of size (*, len(y_stage), len(x_stage))
     """
-    # Place molecule on the AFM stage: shift z so that min(z) = 0
-    z_min = xyz[..., 2].min(dim=-1, keepdim=True)[0]  # (*, 1)
     xyz = xyz.clone()
-    xyz[..., 2] = xyz[..., 2] - z_min
+    if shift_z:
+        # Place molecule on the AFM stage: shift z so that min(z) = 0
+        z_min = xyz[..., 2].min(dim=-1, keepdim=True)[0]  # (*, 1)
+        xyz[..., 2] = xyz[..., 2] - z_min
 
     radius2 = radius**2
     x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"], dtype=xyz.dtype, device=xyz.device) + 0.5*config["resolution_x"] #(W,)
@@ -228,18 +231,21 @@ def surfing(xyz, radius, config:dict[str, float]):
     z_stage = torch.where(index_within_radius.any(dim=-3), temp_max, torch.zeros_like(temp_max, dtype=xyz.dtype, device=xyz.device)) #(H,W)
     return z_stage.flip([-2])
 
-def surfing_old(xyz, radius, config):
+def surfing_old(xyz, radius, config, shift_z=True):
     """
     Compute the maximum height (z-value) of molecular surface at grid points on AFM stage (where z=0)
         Input: xyz (tensor of size (N, 3))
                 radius (tensor of size (N,))
                 config (dict)
+                shift_z (bool) — if True (default), shift z so that min(z) = 0.
+                    Set to False for MD simulation data where molecules are already on the AFM stage.
         Output: z_stage (tensor of size (len(y_stage), len(x_stage))
     """
     device = xyz.device
-    # Place molecule on the AFM stage: shift z so that min(z) = 0
     xyz = xyz.clone()
-    xyz[:, 2] = xyz[:, 2] - xyz[:, 2].min()
+    if shift_z:
+        # Place molecule on the AFM stage: shift z so that min(z) = 0
+        xyz[:, 2] = xyz[:, 2] - xyz[:, 2].min()
     radius2 = radius**2
     x_stage = torch.arange(config["min_x"], config["max_x"], config["resolution_x"]) + 0.5*config["resolution_x"]
     y_stage = torch.arange(config["min_y"], config["max_y"], config["resolution_y"]) + 0.5*config["resolution_y"]

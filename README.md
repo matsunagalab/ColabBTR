@@ -34,11 +34,18 @@ pip install git+https://github.com/matsunagalab/ColabBTR
 
 ```python
 import torch
-from colabbtr.morphology import define_tip, idilation, ierosion, differentiable_btr
+from colabbtr.morphology import define_tip, surfing, idilation, ierosion, differentiable_btr
 
 # Define a conical probe tip (15x15 pixels, 1.0 nm/pixel)
 tip = define_tip(torch.zeros(15, 15), resolution_x=1.0, resolution_y=1.0,
                  probeRadius=2.0, probeAngle=0.3)
+
+# Compute molecular surface from atomic coordinates
+# By default, surfing shifts z so that min(z)=0 (places molecule on stage).
+# For MD simulation data where molecules are already on the AFM stage,
+# use shift_z=False to keep the original z coordinates:
+surface = surfing(xyz, radius, config)                # shift_z=True (default)
+surface = surfing(xyz, radius, config, shift_z=False) # keep original z
 
 # Reconstruct tip shape from AFM images (nframe x H x W tensor)
 tip_est, loss = differentiable_btr(images, tip_size=(15, 15), nepoch=200, lr=0.1)
