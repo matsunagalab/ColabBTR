@@ -1,3 +1,7 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "colabbtr"
 version = "0.0.1"
@@ -5,12 +9,20 @@ description = """End-to-end differentiable blind tip reconstruction on Colab imp
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [{name = "Yasuhiro Matsunaga", email = "ymatsunaga@mail.saitama-u.ac.jp"}]
-
 dependencies = [
     "torch",
     "tqdm",
 ]
 
-[tool.setuptools]
-packages = ["colabbtr"]
-
+[dependency-groups]
+notebook = [
+    "numpy",
+    "matplotlib",
+    "gwyfile",
+    "plotly",
+    "scikit-learn",
+    "gdown",
+    "spmpy @ git+https://github.com/kogens/spmpy",
+    "jupyter",
+    "ipywidgets",
+]
