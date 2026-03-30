@@ -1,86 +1,110 @@
 # ColabBTR
 
-End-to-end differentiable blind tip reconstruction (BTR) for Atomic Force Microscopy (AFM) images, implemented in PyTorch.
+End-to-end differentiable **Blind Tip Reconstruction (BTR)** for Atomic Force Microscopy (AFM) images, implemented in PyTorch.
 
-BTR reconstructs AFM probe tip shapes and removes tip convolution artifacts from noisy AFM images.
+Given a set of AFM images, BTR reconstructs the probe tip shape and removes tip convolution artifacts (dilation) to recover the original sample surface.
 
 ## Quick start on Google Colab
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/matsunagalab/ColabBTR/blob/main/ColabBTR.ipynb)
 
-Open the notebook and follow the interactive steps — no local setup required.
+Open the notebook and follow the interactive steps -- no local setup required.
 
 ## Local installation
 
-Requires Python >= 3.9 and [uv](https://docs.astral.sh/uv/).
+Requires Python >= 3.9.
+
+### With uv (recommended)
 
 ```bash
 git clone https://github.com/matsunagalab/ColabBTR.git
 cd ColabBTR
+uv sync            # install core package (torch, tqdm, libasd)
 ```
 
-### Install the core package only
+### With pip
 
 ```bash
-uv sync
+pip install git+https://github.com/matsunagalab/ColabBTR
 ```
 
-This installs the `colabbtr` module with its minimal dependencies (PyTorch, tqdm).
+## Usage
 
-### Run the notebook locally
+### As a library
+
+```python
+import torch
+from colabbtr.morphology import define_tip, idilation, ierosion, differentiable_btr
+
+# Define a conical probe tip (15x15 pixels, 1.0 nm/pixel)
+tip = define_tip(torch.zeros(15, 15), resolution_x=1.0, resolution_y=1.0,
+                 probeRadius=2.0, probeAngle=0.3)
+
+# Reconstruct tip shape from AFM images (nframe x H x W tensor)
+tip_est, loss = differentiable_btr(images, tip_size=(15, 15), nepoch=200, lr=0.1)
+
+# Deconvolve: remove tip artifacts to recover the sample surface
+surface = ierosion(afm_image, tip_est)
+```
+
+### Run the Colab notebook locally
 
 ```bash
 uv sync --group notebook
 uv run jupyter notebook ColabBTR.ipynb
 ```
 
-### Run the test suite
+## How it works
+
+AFM images are **dilated** versions of the true sample surface -- the recorded height at each pixel is the maximum of (surface + tip) over the tip footprint. BTR reverses this by optimizing a tip shape that minimizes the reconstruction error:
+
+1. Start with a flat (zero) tip estimate
+2. For each image: erode by the tip, then dilate back, and compute the MSE with the original
+3. Update the tip via gradient descent (AdamW)
+4. Clamp the tip to non-positive values and re-center after each step
+
+The key morphological operations (dilation/erosion) are differentiable and JIT-compiled for performance.
+
+## Tests
 
 ```bash
 uv sync --group dev
 uv run pytest tests/ -v
 ```
 
-This downloads PDB [3A5I](https://www.rcsb.org/structure/3A5I), generates synthetic AFM images with a known tip shape, runs BTR to reconstruct the tip, and checks the reconstruction quality.
+The test suite:
 
-### Run the visualization script
+- **test_btr.py** -- End-to-end roundtrip: generates synthetic AFM images from PDB [3A5I](https://www.rcsb.org/structure/3A5I) with a known tip, runs BTR, and checks reconstruction quality
+- **test_morphology.py** -- Unit tests for dilation, erosion, tip definition, surfing, translate_tip_mean, Atom2Radius consistency, and PINN models
 
-```bash
-uv run python scripts/test_btr.py
-```
-
-Generates comparison plots (ground truth vs. reconstructed tip, loss curve, surface deconvolution) in the `results/` directory.
-
-## Using colabbtr as a library
+### Visualization
 
 ```bash
-pip install git+https://github.com/matsunagalab/ColabBTR
+uv run python tests/visualize.py
 ```
 
-```python
-import torch
-from colabbtr.morphology import define_tip, surfing, idilation, ierosion, differentiable_btr
+Generates `afmhot`-colored comparison plots (tip shape, surface/image/erosion pipeline, BTR reconstruction) in `tests/`.
 
-# Create a probe tip shape
-tip = define_tip(torch.zeros(10, 10), resolution_x=1.0, resolution_y=1.0,
-                 probeRadius=5.0, probeAngle=0.3)
+## Notebooks
 
-# Reconstruct tip from AFM images
-tip_est, loss = differentiable_btr(images, tip_size=(10, 10), nepoch=200, lr=0.1)
-
-# Deconvolve (erosion) to recover the original surface
-surface = ierosion(image, tip_est)
-```
+| Notebook | Description |
+|----------|-------------|
+| **ColabBTR.ipynb** | Main pipeline: data upload, tilt correction, denoising, BTR, erosion, download |
+| **dilation.ipynb** | PDB structure to molecular surface to simulated AFM image |
+| **simulation_on_stage.ipynb** | MD simulation (OpenMM) of molecules on an AFM stage |
+| **development.ipynb** | Development/testing of morphological operations |
 
 ## Example data
 
-`data/` contains synthetic test cases with `.npy` arrays:
+`data/` contains synthetic test cases (`.npy` arrays):
 
-- `single_tip/` — single conical tip (576 frames, 30x30 pixels)
-- `double_tip/` — bifurcated double tip
-- `mixed_tip/` — mixed tip (subset of frames)
+| Directory | Contents |
+|-----------|----------|
+| `single_tip/` | Single conical tip |
+| `double_tip/` | Bifurcated double tip |
+| `mixed_tip/` | Mixed tip (subset of frames) |
 
-Each directory includes `images.npy` (synthetic AFM images), `surfs.npy` (ground truth surfaces), and `tip.npy` (ground truth tip shape).
+Each includes `images.npy` (AFM images), `surfs.npy` (ground truth surfaces), and `tip.npy` (ground truth tip).
 
 ## Citation
 
@@ -93,6 +117,4 @@ https://doi.org/10.1038/s41598-022-27057-2
 
 ## Contact
 
-If you have any questions or troubles, feel free to create GitHub issues, or send email to us.
-
-Yasuhiro Matsunaga — ymatsunaga@mail.saitama-u.ac.jp
+Questions or issues? Open a [GitHub issue](https://github.com/matsunagalab/ColabBTR/issues) or email Yasuhiro Matsunaga (ymatsunaga@mail.saitama-u.ac.jp).
