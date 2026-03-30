@@ -76,6 +76,20 @@ tip_est, loss = differentiable_btr(
 
 # 5. Deconvolve: remove tip artifacts to recover the sample surfaces
 surfaces_recovered = torch.stack([ierosion(images[i], tip_est) for i in range(nframe)])
+
+# 6. Compare tip cross-sections (ground truth vs reconstructed)
+import matplotlib.pyplot as plt
+
+center = tip.shape[0] // 2
+pixels = range(tip.shape[1])
+plt.plot(pixels, tip[center, :].numpy(), label="Ground truth")
+plt.plot(pixels, tip_est[center, :].numpy(), label="BTR estimate")
+plt.xlabel("Pixel")
+plt.ylabel("Height (nm)")
+plt.legend()
+plt.title("Tip cross-section (center row)")
+plt.savefig("tip_cross_section.png", dpi=150, bbox_inches="tight")
+plt.show()
 ```
 
 ### Save results as ASD files
