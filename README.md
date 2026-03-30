@@ -17,6 +17,10 @@ Requires Python >= 3.9.
 ### With uv (recommended)
 
 ```bash
+# 1. Install uv project manager (if you don't already have it)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. Clone and sync
 git clone https://github.com/matsunagalab/ColabBTR.git
 cd ColabBTR
 uv sync            # install core package (torch, tqdm, libasd)
