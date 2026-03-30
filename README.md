@@ -34,24 +34,40 @@ pip install git+https://github.com/matsunagalab/ColabBTR
 
 ```python
 import torch
-from colabbtr.morphology import define_tip, surfing, idilation, ierosion, differentiable_btr
+from colabbtr.morphology import (
+    load_pdb_ca, define_tip, surfing, idilation, ierosion, differentiable_btr,
+)
 
-# Define a conical probe tip (15x15 pixels, 1.0 nm/pixel)
+# 1. Load protein structure (CA atoms) from PDB file
+xyz, radii = load_pdb_ca("data/3A5I.pdb")  # xyz: (N, 3) in nm, radii: (N,) in nm
+xyz = xyz - xyz.mean(dim=0, keepdim=True)   # center the molecule
+
+# 2. Define a conical probe tip (15x15 pixels, 1.0 nm/pixel)
 tip = define_tip(torch.zeros(15, 15), resolution_x=1.0, resolution_y=1.0,
                  probeRadius=2.0, probeAngle=0.3)
 
-# Compute molecular surface from atomic coordinates
-# By default, surfing shifts z so that min(z)=0 (places molecule on stage).
-# For MD simulation data where molecules are already on the AFM stage,
-# use shift_z=False to keep the original z coordinates:
-surface = surfing(xyz, radius, config)                # shift_z=True (default)
-surface = surfing(xyz, radius, config, shift_z=False) # keep original z
+# 3. Compute molecular surface and simulate AFM images
+config = {
+    "min_x": -15.0, "max_x": 15.0,
+    "min_y": -15.0, "max_y": 15.0,
+    "resolution_x": 1.0, "resolution_y": 1.0,
+}
+nframe = 5
+images = []
+for _ in range(nframe):
+    # random rotation of the molecule
+    R, _ = torch.linalg.qr(torch.randn(3, 3))
+    xyz_rot = xyz @ R.T
+    surface = surfing(xyz_rot, radii, config)        # (H, W) molecular surface
+    image = idilation(surface.double(), tip.double()) # (H, W) simulated AFM image
+    images.append(image)
+images = torch.stack(images)  # (nframe, H, W)
 
-# Reconstruct tip shape from AFM images (nframe x H x W tensor)
+# 4. Reconstruct tip shape from AFM images via BTR
 tip_est, loss = differentiable_btr(images, tip_size=(15, 15), nepoch=200, lr=0.1)
 
-# Deconvolve: remove tip artifacts to recover the sample surface
-surface = ierosion(afm_image, tip_est)
+# 5. Deconvolve: remove tip artifacts to recover the sample surface
+surface_recovered = ierosion(images[0], tip_est)
 ```
 
 ### Run the Colab notebook locally
