@@ -5,7 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, TensorDataset
 import torch.optim as optim
-from tqdm.notebook import tqdm
+from tqdm.auto import tqdm
 
 def compute_xc_yc(tip):
     """
@@ -776,6 +776,61 @@ def surface_reconstruct(dataloader,n_hidden_layers,n_nodes,lr,num_epochs,num_fra
         surface_estimate = torch.cat([surface_estimate, surface.unsqueeze(0)], dim=0)
 
     surface_estimate = surface_estimate.detach()
-    
+
     return surface_estimate ,loss_train
-        
+
+
+def load_pdb_ca(filepath):
+    """
+    Load CA (alpha carbon) atoms from a PDB file.
+    Returns coordinates and residue radii using Atom2Radius.
+        Input: filepath (str) - path to PDB file
+        Output: xyz (tensor of size (N, 3)) in nm,
+                radii (tensor of size (N,))  in nm
+    """
+    coords = []
+    radii = []
+    with open(filepath) as f:
+        for line in f:
+            if not (line.startswith("ATOM") or line.startswith("HETATM")):
+                continue
+            atom_name = line[12:16].strip()
+            if atom_name != "CA":
+                continue
+            x = float(line[30:38])
+            y = float(line[38:46])
+            z = float(line[46:54])
+            resname = line[17:20].strip()
+            if resname in Atom2Radius:
+                r = Atom2Radius[resname]
+            else:
+                r = 0.17  # default C radius
+            coords.append([x / 10.0, y / 10.0, z / 10.0])  # Angstrom -> nm
+            radii.append(r)
+    xyz = torch.tensor(coords, dtype=torch.float32)
+    radii = torch.tensor(radii, dtype=torch.float32)
+    return xyz, radii
+
+
+def pixel_rmsd(tip1, tip2, ref, cutoff=-70.0, max_shift=5):
+    """
+    Compute pixel RMSD between two tip shapes with alignment.
+    Tries all shifts in [-max_shift, max_shift] and returns the minimum RMSD.
+    Only pixels where ref > cutoff are considered.
+        Input: tip1, tip2, ref (tensors of same shape)
+               cutoff (float) - threshold for ref mask
+               max_shift (int) - maximum shift in pixels
+        Output: rmsd (float)
+    """
+    rmsd_min = float('inf')
+    for du in range(-max_shift, max_shift + 1):
+        for dv in range(-max_shift, max_shift + 1):
+            shifted = torch.roll(tip1, shifts=(du, dv), dims=(0, 1))
+            mask = ref > cutoff
+            if mask.sum() == 0:
+                continue
+            diff = (shifted[mask] - tip2[mask]) ** 2
+            rmsd = torch.sqrt(diff.mean()).item()
+            if rmsd < rmsd_min:
+                rmsd_min = rmsd
+    return rmsd_min
