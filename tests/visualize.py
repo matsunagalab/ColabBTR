@@ -121,7 +121,7 @@ def visualize_btr():
 
     print("Running BTR (50 epochs)...")
     tip_est, loss_train = differentiable_btr(
-        images, tip_size=tip_gt.shape, nepoch=50, lr=0.1, weight_decay=0.001, is_tqdm=True,
+        images, tip_size=tip_gt.shape, nepoch=200, lr=0.1, weight_decay=0.001, is_tqdm=True,
     )
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))

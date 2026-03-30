@@ -97,7 +97,7 @@ def test_btr_roundtrip(synthetic_images, ground_truth_tip):
     tip_est, loss_train = differentiable_btr(
         images,
         tip_size=tip_gt.shape,
-        nepoch=50,
+        nepoch=200,
         lr=0.1,
         weight_decay=0.001,
         is_tqdm=False,
