@@ -15,6 +15,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
     """
     tip_est, loss = differentiable_btr(
         images, tip_size,
-        nepoch=250, lr=0.1, weight_decay=0.001, is_tqdm=False,
+        nepoch=200, lr=0.1, weight_decay=0.01, is_tqdm=False,
     )
     return tip_est, loss
