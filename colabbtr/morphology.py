@@ -933,6 +933,29 @@ def load_pdb_ca(filepath):
     return xyz, radii
 
 
+def add_noise(images, noise_type="gaussian", sigma=0.3, seed=None):
+    """
+    Add noise to AFM images.
+        Input: images (tensor of size (nframe, H, W) or (H, W))
+               noise_type ("gaussian" or "poisson")
+               sigma (float) — noise level in nm (default 0.3)
+               seed (int or None) — random seed for reproducibility
+        Output: noisy_images (tensor, same shape as images)
+    """
+    gen = torch.Generator(device=images.device)
+    if seed is not None:
+        gen.manual_seed(seed)
+    if noise_type == "gaussian":
+        noise = torch.randn(images.shape, dtype=images.dtype, device=images.device, generator=gen) * sigma
+        return images + noise
+    elif noise_type == "poisson":
+        shifted = torch.clamp(images, min=0.0) / sigma
+        noisy = torch.poisson(shifted, generator=gen) * sigma
+        return noisy + (images - torch.clamp(images, min=0.0))
+    else:
+        raise ValueError(f"Unknown noise_type: {noise_type}. Use 'gaussian' or 'poisson'.")
+
+
 def pixel_rmsd(tip1, tip2, ref, cutoff=-70.0, max_shift=5):
     """
     Compute pixel RMSD between two tip shapes with alignment.

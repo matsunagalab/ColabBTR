@@ -25,6 +25,18 @@ dev = [
     "matplotlib",
     "scipy",
 ]
+benchmark = [
+    "pytest",
+    "numpy",
+    "matplotlib",
+    "scipy",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "benchmark: slow statistical benchmarks (deselect with '-m not benchmark')",
+]
+
 notebook = [
     "numpy",
     "matplotlib",

@@ -5,6 +5,7 @@ results/
 ref/
 .DS_Store
 tests/vis_*.png
+benchmark_results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
