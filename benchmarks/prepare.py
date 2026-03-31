@@ -35,8 +35,8 @@ SEEDS = [42, 123, 456]
 NFRAME = 20
 
 AFM_CONFIG = {
-    "min_x": -15.0, "max_x": 15.0,
-    "min_y": -15.0, "max_y": 15.0,
+    "min_x": -20.0, "max_x": 20.0,
+    "min_y": -20.0, "max_y": 20.0,
     "resolution_x": 1.0, "resolution_y": 1.0,
 }
 
