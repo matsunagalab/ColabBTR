@@ -43,10 +43,10 @@ def reconstruct_tip(images, tip_size, **kwargs):
             lr_factor = 1.0
             wd_factor = 1.0
         else:
-            # Cool-down: reduce regularization, decay LR for fine-tuning
+            # Cool-down: aggressive regularization reduction, decay LR for fine-tuning
             decay_progress = (epoch - 150) / 50
-            lr_factor = 1.0 * (0.2 ** decay_progress)
-            wd_factor = 0.1 * (1 + decay_progress)  # Reduce regularization
+            lr_factor = 1.0 * (0.1 ** decay_progress)
+            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)  # Aggressively reduce regularization
 
         # Update optimizer parameters
         for param_group in optimizer.param_groups:
