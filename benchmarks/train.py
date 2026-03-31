@@ -38,16 +38,17 @@ def reconstruct_tip(images, tip_size, **kwargs):
         # Main: epochs 30-150, stable or slight decay
         # Cool-down: last 50 epochs, exponential decay to fine-tune
 
-        if epoch < 30:
-            # Warm-up: linearly increase from 0.05 to 0.15
-            lr_factor = 0.5 + (epoch / 30) * 0.5
-        elif epoch < 150:
-            # Stable phase
-            lr_factor = 1.0
+        if epoch < 40:
+            # Warm-up: linearly increase from 0.6 to 1.2
+            lr_factor = 0.6 + (epoch / 40) * 0.6
+        elif epoch < 160:
+            # Stable phase with slight exponential decay
+            decay = (epoch - 40) / (160 - 40)
+            lr_factor = 1.2 * (0.9 ** (decay * 5))
         else:
-            # Cool-down: exponential decay
-            decay_progress = (epoch - 150) / 50
-            lr_factor = 1.0 * (0.1 ** decay_progress)
+            # Cool-down: faster exponential decay
+            decay_progress = (epoch - 160) / 40
+            lr_factor = 1.2 * 0.9 ** (5) * (0.1 ** decay_progress)
 
         # Update optimizer learning rate
         for param_group in optimizer.param_groups:
