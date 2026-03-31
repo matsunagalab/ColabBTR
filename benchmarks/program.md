@@ -46,6 +46,13 @@ Things you might try:
 - Ensemble methods across frames
 - Loss function modifications
 
+## Timing
+
+- `--quick` (1 random condition): ~21 seconds
+- Full benchmark (72 conditions): ~25 minutes
+- Each iteration (change + quick eval): ~4-5 minutes
+- Recommended: Use `--quick` for rapid feedback, full benchmark every 5-10 iterations
+
 ## Experiment Loop (Autoresearch Mode)
 
 Work continuously in this cycle:
