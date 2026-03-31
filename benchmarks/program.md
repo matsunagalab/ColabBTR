@@ -5,7 +5,7 @@ You are optimizing the BTR (Blind Tip Reconstruction) algorithm for AFM images.
 ## Goal
 
 Minimize the average RMSD between estimated and ground truth tip shapes
-across all benchmark conditions (3 PDBs x 2 tips x 4 noise levels x 3 seeds = 72 conditions).
+across all benchmark conditions (3 PDBs [3A5I, 1GGG, 1SMP] x 2 tips x 4 noise levels x 3 seeds = 72 conditions).
 
 ## Rules
 

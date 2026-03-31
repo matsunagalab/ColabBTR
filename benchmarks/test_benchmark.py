@@ -18,7 +18,7 @@ BLUNT = {"probe_radius": 5.0, "probe_angle": 0.5, "tip_size": 15, "label": "blun
 
 
 @pytest.mark.benchmark
-@pytest.mark.parametrize("pdb_id", ["3A5I", "1GGG", "1AON"])
+@pytest.mark.parametrize("pdb_id", ["3A5I", "1GGG", "1SMP"])
 @pytest.mark.parametrize("noise_type,noise_sigma",
                          [("none", 0.0), ("gaussian", 0.3), ("gaussian", 1.0), ("poisson", 0.5)],
                          ids=["none", "gauss03", "gauss10", "poisson05"])

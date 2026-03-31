@@ -16,7 +16,7 @@ from colabbtr.morphology import (
     surfing,
 )
 
-PDB_IDS = ["3A5I", "1GGG", "1AON"]
+PDB_IDS = ["3A5I", "1GGG", "1SMP"]
 PDB_CACHE = Path("/tmp/pdb_cache")
 
 TIP_CONFIGS = {
