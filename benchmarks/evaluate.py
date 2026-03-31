@@ -22,10 +22,25 @@ def get_git_hash():
         return "unknown"
 
 
-def run_single(data_path):
+def get_device(force_cpu=False):
+    """Select best available device: CUDA > MPS > CPU."""
+    if force_cpu:
+        return torch.device("cpu")
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
+
+def run_single(data_path, device=None):
     """Run BTR on a single prepared dataset and return result dict."""
     data = torch.load(data_path, weights_only=False)
     images = data["images"]
+    # MPS does not support float64; use float32 on MPS
+    if device.type == "mps":
+        images = images.float()
+    images = images.to(device)
     surfaces = data["surfaces"]
     tip_gt = data["tip_gt"]
     cfg = data["config"]
@@ -35,6 +50,8 @@ def run_single(data_path):
     t0 = time.time()
     tip_est, loss = reconstruct_tip(images, tip_size)
     elapsed = time.time() - t0
+
+    tip_est = tip_est.cpu()
 
     # Dynamic cutoff: use median of per-frame max heights.
     # The tip can only be probed as deep as the molecule height in each frame.
@@ -57,6 +74,7 @@ def run_single(data_path):
         "rmsd_cutoff": round(cutoff, 4),
         "final_loss": round(loss[-1], 6),
         "elapsed_sec": round(elapsed, 1),
+        "device": str(device),
         "git_commit": get_git_hash(),
         "timestamp": datetime.now().isoformat(),
     }
@@ -72,7 +90,12 @@ def main():
     parser.add_argument("--tip", help="Filter by tip label (sharp/blunt)")
     parser.add_argument("--quick", action="store_true",
                         help="Run only one condition (smoke test)")
+    parser.add_argument("--cpu", action="store_true",
+                        help="Force CPU (disable CUDA/MPS)")
     args = parser.parse_args()
+
+    device = get_device(force_cpu=args.cpu)
+    print(f"Device: {device}")
 
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
@@ -103,7 +126,7 @@ def main():
 
     for i, pt_file in enumerate(pt_files):
         print(f"[{i+1}/{len(pt_files)}] {pt_file.name} ...", end=" ", flush=True)
-        result = run_single(pt_file)
+        result = run_single(pt_file, device=device)
         results.append(result)
         print(f"RMSD={result['rmsd']:.4f}  loss={result['final_loss']:.6f}  "
               f"({result['elapsed_sec']:.1f}s)")

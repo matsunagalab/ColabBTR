@@ -169,9 +169,10 @@ def differentiable_btr(images, tip_size, nepoch=100, lr=0.1, weight_decay=0.0, i
                weight_decay (float) for AdamW
         Output: tip_estimate (tensor of tip_size), loss_train (list)
     """
-    # Initialize tip with zeros
+    # Initialize tip with zeros (match input dtype for MPS compatibility)
     device = images.device
-    tip = torch.zeros(tip_size, dtype=torch.float64, requires_grad=True, device=device)
+    dtype = images.dtype
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
 
     # Optimization settings
     optimizer = optim.AdamW([tip], lr=lr, weight_decay=weight_decay)
