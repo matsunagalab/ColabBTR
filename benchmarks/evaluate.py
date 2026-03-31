@@ -36,8 +36,11 @@ def run_single(data_path):
     tip_est, loss = reconstruct_tip(images, tip_size)
     elapsed = time.time() - t0
 
-    # Dynamic cutoff: tip can only be probed to molecule height depth
-    cutoff = -surfaces.max().item()
+    # Dynamic cutoff: use median of per-frame max heights.
+    # The tip can only be probed as deep as the molecule height in each frame.
+    # Using the median (not the global max) avoids outlier orientations.
+    frame_max_heights = surfaces.amax(dim=(1, 2))
+    cutoff = -frame_max_heights.median().item()
     rmsd = pixel_rmsd(tip_est, tip_gt.to(tip_est.dtype), tip_gt.to(tip_est.dtype),
                       cutoff=cutoff)
 

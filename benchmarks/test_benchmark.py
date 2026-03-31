@@ -42,7 +42,8 @@ def test_btr_benchmark(pdb_id, noise_type, noise_sigma, tip_cfg, seed,
     tip_est, loss = reconstruct_tip(images, tip_size)
     elapsed = time.time() - t0
 
-    cutoff = -surfaces.max().item()
+    frame_max_heights = surfaces.amax(dim=(1, 2))
+    cutoff = -frame_max_heights.median().item()
     rmsd = pixel_rmsd(tip_est, tip_gt.to(tip_est.dtype), tip_gt.to(tip_est.dtype),
                       cutoff=cutoff)
 
