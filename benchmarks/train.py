@@ -9,11 +9,12 @@ from colabbtr.morphology import (
 
 
 def reconstruct_tip(images, tip_size, **kwargs):
-    """BTR with adaptive learning rate schedule and optimized weight decay.
+    """BTR with adaptive learning rate and weight decay scheduling.
 
-    Progressive learning rate schedule: start with moderate lr, gradually
-    increase during early epochs for faster convergence, then anneal to fine-tune.
-    Combines benefits of warm-start and refinement phases.
+    Multi-phase optimization:
+    - Warm-up: moderate regularization, increasing learning rate
+    - Main: full learning, stable heavy regularization
+    - Cool-down: reduced regularization, decaying learning rate for fine-tuning
 
         Input: images (tensor of size (nframe, H, W))
                tip_size (tuple) — (tip_height, tip_width)
@@ -25,34 +26,32 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # Initialize tip
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
 
+    # Initial optimizer
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
 
-    # Learning rate schedule with scheduler
-    # Warm-up then decay pattern
     nepoch = 200
     loss_train = []
 
     for epoch in tqdm(range(nepoch), disable=True):
-        # Adaptive learning rate schedule
-        # Warm-up: first 30 epochs, increase learning rate
-        # Main: epochs 30-150, stable or slight decay
-        # Cool-down: last 50 epochs, exponential decay to fine-tune
-
-        if epoch < 40:
-            # Warm-up: linearly increase from 0.6 to 1.2
-            lr_factor = 0.6 + (epoch / 40) * 0.6
-        elif epoch < 160:
-            # Stable phase with slight exponential decay
-            decay = (epoch - 40) / (160 - 40)
-            lr_factor = 1.2 * (0.9 ** (decay * 5))
+        # Three-phase learning rate and weight decay schedule
+        if epoch < 50:
+            # Warm-up: moderate regularization, increasing LR
+            lr_factor = 0.6 + (epoch / 50) * 0.4
+            wd_factor = 1.0
+        elif epoch < 150:
+            # Main phase: full learning with maximum regularization
+            lr_factor = 1.0
+            wd_factor = 1.0
         else:
-            # Cool-down: faster exponential decay
-            decay_progress = (epoch - 160) / 40
-            lr_factor = 1.2 * 0.9 ** (5) * (0.1 ** decay_progress)
+            # Cool-down: reduce regularization, decay LR for fine-tuning
+            decay_progress = (epoch - 150) / 50
+            lr_factor = 1.0 * (0.2 ** decay_progress)
+            wd_factor = 0.1 * (1 + decay_progress)  # Reduce regularization
 
-        # Update optimizer learning rate
+        # Update optimizer parameters
         for param_group in optimizer.param_groups:
             param_group['lr'] = 0.1 * lr_factor
+            param_group['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(images.shape[0]):
