@@ -15,58 +15,27 @@ def laplacian_smoothing(tip, weight=0.01):
     return weight * roughness
 
 
-def estimate_noise_level(images):
-    """Estimate noise level from images using MAD of the discrete Laplacian."""
-    estimates = []
-    for i in range(images.shape[0]):
-        img = images[i]
-        lap = (img[2:, 1:-1] + img[:-2, 1:-1] + img[1:-1, 2:] + img[1:-1, :-2]
-               - 4 * img[1:-1, 1:-1])
-        mad = torch.median(torch.abs(lap - torch.median(lap))).item()
-        estimates.append(mad)
-    return float(torch.median(torch.tensor(estimates)).item())
-
-
-def lorentzian_loss(residuals, sigma):
-    """Lorentzian (Cauchy) robust loss function.
-
-    L(x) = log(1 + (x/σ)²)
-
-    Properties:
-    - Near x=0: ≈ x²/σ² (quadratic, like MSE — preserves sensitivity)
-    - Far from x=0: ≈ 2·log(|x|/σ) (logarithmic — bounds outlier influence)
-    - Unlike Tukey bisquare, gradient never reaches zero (always provides signal)
-    - σ controls the transition: residuals << σ → quadratic, >> σ → robust
-
-    This directly addresses the root cause of high-noise failure: noisy pixels
-    produce large residuals that dominate the MSE gradient, pulling the tip
-    toward wrong local minima.
-    """
-    # Multiply by σ² so that for small residuals: σ²·log(1+(r/σ)²) ≈ r² (matches MSE)
-    return sigma ** 2 * torch.mean(torch.log1p((residuals / sigma) ** 2))
-
-
 def reconstruct_tip(images, tip_size, **kwargs):
-    """BTR with Lorentzian robust loss and noise-adaptive scale.
+    """BTR with tip depth regularizer to counteract opening bluntness bias.
 
-    Architecture change from baseline:
-    - Replace MSE with Lorentzian loss for the reconstruction term
-    - Scale parameter σ is set from estimated noise level
-    - For clean data: σ is small → Lorentzian ≈ MSE (no change)
-    - For noisy data: σ is large → outlier pixels are downweighted
+    Key insight: The morphological opening is anti-extensive:
+        opening(image, tip) <= image for ANY tip.
+    This means a flat (zero) tip gives opening = image, loss = 0.
+    The optimizer has no incentive to make the tip deeper.
 
-    Everything else (Laplacian smoothing, two-stage optimization,
-    hard-frame selection) remains identical to baseline.
+    Fix: Add a depth term alpha * mean(tip) to the loss.
+    Since tip <= 0 (negative values = deeper), mean(tip) < 0 for deep tips.
+    This REWARDS deeper tips, counteracting the bluntness bias.
+
+    In equilibrium:
+    - Reconstruction loss: pushes toward blunt (anti-extensive bias)
+    - Depth regularizer: pushes toward deep/sharp
+    - Laplacian smoothing: constrains shape
+    The balance finds a tip that's deep enough while fitting the data.
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
-
-    # Estimate noise and set Lorentzian scale
-    noise_level = estimate_noise_level(images)
-    # For clean data (noise≈0): sigma small → Lorentzian ≈ MSE
-    # For noisy data (noise≈3): sigma large → robust to outlier pixels
-    sigma = max(0.1, noise_level * 0.5)
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
@@ -74,6 +43,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
     nepoch_stage1 = 140
     nepoch_stage2 = 60
     loss_train = []
+
+    # Depth regularizer weight — counteracts bluntness bias of opening loss
+    depth_alpha = 0.005
 
     # STAGE 1: Coarse optimization on all frames
     for epoch in range(nepoch_stage1):
@@ -99,10 +71,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
         for iframe in range(nframe):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            residuals = image_reconstructed - images[iframe]
-            recon_loss = lorentzian_loss(residuals, sigma)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
-            loss = recon_loss + smooth_loss
+            # Depth regularizer: alpha * mean(tip). Since tip <= 0,
+            # this is negative for deep tips → rewards depth
+            depth_loss = depth_alpha * torch.mean(tip)
+            loss = recon_loss + smooth_loss + depth_loss
             loss.backward()
             optimizer.step()
 
@@ -126,11 +100,13 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_frame_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
+    # STAGE 2: Hard-frame refinement (reduce depth penalty for fine-tuning)
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
         smooth_weight = 0.01 + 0.01 * decay_progress
+        # Decay depth penalty in Stage 2 — shape is already established
+        depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
@@ -141,10 +117,10 @@ def reconstruct_tip(images, tip_size, **kwargs):
             for iframe in hard_frame_indices:
                 optimizer.zero_grad()
                 image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                residuals = image_reconstructed - images[iframe]
-                recon_loss = lorentzian_loss(residuals, sigma)
+                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
-                loss = recon_loss + smooth_loss
+                depth_loss = depth_weight * torch.mean(tip)
+                loss = recon_loss + smooth_loss + depth_loss
                 loss.backward()
                 optimizer.step()
 
