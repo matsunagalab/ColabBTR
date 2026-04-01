@@ -34,16 +34,8 @@ def reconstruct_tip(images, tip_size, **kwargs):
     dtype = images.dtype
     nframe = images.shape[0]
 
-    # Initialize tip as a cone (not flat zeros)
-    # Flat init → opening(image)≈image → vanishing gradients. Cone breaks this.
-    h, w = tip_size
-    cx, cy = h // 2, w // 2
-    yy, xx = torch.meshgrid(torch.arange(h, device=device, dtype=dtype),
-                             torch.arange(w, device=device, dtype=dtype), indexing='ij')
-    r = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    tip_init = -r * 1.0  # cone with slope 1.0 per pixel
-    tip_init = tip_init - tip_init.max()  # ensure max is 0 at apex
-    tip = tip_init.clone().requires_grad_(True)
+    # Initialize tip
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
 
     nepoch_stage1 = 140
@@ -71,8 +63,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             param_group['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
-        frame_order = torch.randperm(nframe)  # shuffle frame order each epoch
-        for iframe in frame_order.tolist():
+        for iframe in range(nframe):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe, :, :], tip), tip)
             recon_loss = torch.mean((image_reconstructed - images[iframe, :, :]) ** 2)
@@ -136,6 +127,49 @@ def reconstruct_tip(images, tip_size, **kwargs):
                 loss_tmp += loss.item()
 
         loss_train.append(loss_tmp)
+
+    # STAGE 3: Stochastic Weight Averaging (SWA)
+    # Average tip snapshots from continued optimization at constant low LR.
+    # SWA finds wider optima that generalize better (Izmailov et al., 2018).
+    # No shape assumptions — purely optimization-level improvement.
+    swa_tip = tip.data.clone()
+    swa_count = 1
+    swa_lr = 0.005
+    nepoch_swa = 30
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = swa_lr
+        param_group['weight_decay'] = 0.001  # light regularization
+
+    for epoch in range(nepoch_swa):
+        loss_tmp = 0.0
+        for iframe in range(nframe):
+            optimizer.zero_grad()
+            image_reconstructed = idilation(ierosion(images[iframe, :, :], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images[iframe, :, :]) ** 2)
+            smooth_loss = laplacian_smoothing(tip, weight=0.01)
+            loss = recon_loss + smooth_loss
+            loss.backward()
+            optimizer.step()
+
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+
+            loss_tmp += loss.item()
+
+        # Collect snapshot at end of each SWA epoch
+        with torch.no_grad():
+            swa_tip += tip.data
+            swa_count += 1
+
+        loss_train.append(loss_tmp)
+
+    # Apply SWA average
+    with torch.no_grad():
+        tip.data = swa_tip / swa_count
+        tip.data = torch.clamp(tip, max=0.0)
+        tip.data = translate_tip_mean(tip)
 
     tip_estimate = tip.detach()
     return tip_estimate, loss_train
