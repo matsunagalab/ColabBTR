@@ -15,6 +15,54 @@ def laplacian_smoothing(tip, weight=0.01):
     return weight * roughness
 
 
+def villarrubia_refine(images, tip):
+    """Post-process: apply classical Villarrubia BTR morphological bound.
+
+    For each frame, compute the tightest upper bound on tip depth that is
+    consistent with the observed image and estimated surface. Correct any
+    tip pixels that are deeper than the bound.
+
+    This is the mathematical projection onto the feasible set of morphologically
+    consistent tips. Complementary to gradient-based optimization.
+    """
+    nframe = images.shape[0]
+    th, tw = tip.shape
+    cx, cy = th // 2, tw // 2
+    H, W = images.shape[1], images.shape[2]
+
+    tip_bound = torch.full_like(tip, float('-inf'))
+
+    with torch.no_grad():
+        for iframe in range(nframe):
+            surface = ierosion(images[iframe], tip)
+
+            for dp in range(th):
+                for dq in range(tw):
+                    shift_x = dp - cx
+                    shift_y = dq - cy
+
+                    # Valid overlap region (avoids wrap-around artifacts)
+                    sx0 = max(0, -shift_x)
+                    sx1 = min(H, H - shift_x)
+                    sy0 = max(0, -shift_y)
+                    sy1 = min(W, W - shift_y)
+
+                    if sx1 <= sx0 or sy1 <= sy0:
+                        continue
+
+                    img_region = images[iframe, sx0 + shift_x:sx1 + shift_x,
+                                        sy0 + shift_y:sy1 + shift_y]
+                    surf_region = surface[sx0:sx1, sy0:sy1]
+
+                    min_diff = (img_region - surf_region).min()
+                    if min_diff > tip_bound[dp, dq]:
+                        tip_bound[dp, dq] = min_diff
+
+    tip_bound = torch.clamp(tip_bound, max=0.0)
+    # Only correct pixels that are deeper than the bound
+    return torch.max(tip, tip_bound)
+
+
 def reconstruct_tip(images, tip_size, **kwargs):
     """BTR with tip depth regularizer to counteract opening bluntness bias.
 
@@ -131,4 +179,11 @@ def reconstruct_tip(images, tip_size, **kwargs):
                 loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    return tip.detach(), loss_train
+    # POST-PROCESSING: Villarrubia morphological refinement
+    # Projects the tip onto the feasible set of morphologically consistent tips.
+    # Corrects pixels that the depth regularizer may have pushed too deep.
+    with torch.no_grad():
+        tip_refined = villarrubia_refine(images, tip.detach())
+        tip_refined = translate_tip_mean(tip_refined)
+
+    return tip_refined, loss_train
