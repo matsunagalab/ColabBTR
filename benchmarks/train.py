@@ -27,35 +27,68 @@ def estimate_noise_level(images):
     return float(torch.median(torch.tensor(estimates)).item())
 
 
-def _run_optimization(images, tip_size, smooth_schedule, nepoch_s1, nepoch_s2):
-    """Run one complete BTR optimization with a given smoothing schedule.
+def lorentzian_loss(residuals, sigma):
+    """Lorentzian (Cauchy) robust loss function.
 
-    smooth_schedule: callable(epoch, nepoch) -> smooth_weight
-    Returns: (tip, loss_train)
+    L(x) = log(1 + (x/σ)²)
+
+    Properties:
+    - Near x=0: ≈ x²/σ² (quadratic, like MSE — preserves sensitivity)
+    - Far from x=0: ≈ 2·log(|x|/σ) (logarithmic — bounds outlier influence)
+    - Unlike Tukey bisquare, gradient never reaches zero (always provides signal)
+    - σ controls the transition: residuals << σ → quadratic, >> σ → robust
+
+    This directly addresses the root cause of high-noise failure: noisy pixels
+    produce large residuals that dominate the MSE gradient, pulling the tip
+    toward wrong local minima.
+    """
+    return torch.mean(torch.log1p((residuals / sigma) ** 2))
+
+
+def reconstruct_tip(images, tip_size, **kwargs):
+    """BTR with Lorentzian robust loss and noise-adaptive scale.
+
+    Architecture change from baseline:
+    - Replace MSE with Lorentzian loss for the reconstruction term
+    - Scale parameter σ is set from estimated noise level
+    - For clean data: σ is small → Lorentzian ≈ MSE (no change)
+    - For noisy data: σ is large → outlier pixels are downweighted
+
+    Everything else (Laplacian smoothing, two-stage optimization,
+    hard-frame selection) remains identical to baseline.
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
+    # Estimate noise and set Lorentzian scale
+    noise_level = estimate_noise_level(images)
+    # For clean data (noise≈0): sigma small → Lorentzian ≈ MSE
+    # For noisy data (noise≈3): sigma large → robust to outlier pixels
+    sigma = max(0.1, noise_level * 0.5)
+
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+
+    nepoch_stage1 = 140
+    nepoch_stage2 = 60
     loss_train = []
 
-    # Stage 1: All frames
-    for epoch in range(nepoch_s1):
-        progress = epoch / nepoch_s1
-        smooth_weight = smooth_schedule(epoch, nepoch_s1)
-
-        if progress < 40 / 140:
-            lr_factor = 0.6 + (progress / (40 / 140)) * 0.4
+    # STAGE 1: Coarse optimization on all frames
+    for epoch in range(nepoch_stage1):
+        if epoch < 40:
+            lr_factor = 0.6 + (epoch / 40) * 0.4
             wd_factor = 1.0
-        elif progress < 120 / 140:
+            smooth_weight = 0.001
+        elif epoch < 120:
             lr_factor = 1.0
             wd_factor = 1.0
+            smooth_weight = 0.005
         else:
-            decay_p = (progress - 120 / 140) / (20 / 140)
-            lr_factor = 0.1 ** decay_p
-            wd_factor = max(0.05, 1.0 - decay_p * 0.95)
+            decay_progress = (epoch - 120) / 20
+            lr_factor = 0.1 ** decay_progress
+            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
+            smooth_weight = 0.01
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
@@ -65,7 +98,8 @@ def _run_optimization(images, tip_size, smooth_schedule, nepoch_s1, nepoch_s2):
         for iframe in range(nframe):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            residuals = image_reconstructed - images[iframe]
+            recon_loss = lorentzian_loss(residuals, sigma)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             loss = recon_loss + smooth_loss
             loss.backward()
@@ -78,7 +112,7 @@ def _run_optimization(images, tip_size, smooth_schedule, nepoch_s1, nepoch_s2):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Stage 2: Hard-frame refinement
+    # Evaluate frame errors for hard-frame selection
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -91,8 +125,9 @@ def _run_optimization(images, tip_size, smooth_schedule, nepoch_s1, nepoch_s2):
         torch.tensor(frame_errors), k=hard_frame_count, largest=True
     ).indices.tolist()
 
-    for epoch in range(nepoch_s2):
-        decay_progress = epoch / nepoch_s2
+    # STAGE 2: Hard-frame refinement
+    for epoch in range(nepoch_stage2):
+        decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
         smooth_weight = 0.01 + 0.01 * decay_progress
 
@@ -105,7 +140,8 @@ def _run_optimization(images, tip_size, smooth_schedule, nepoch_s1, nepoch_s2):
             for iframe in hard_frame_indices:
                 optimizer.zero_grad()
                 image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+                residuals = image_reconstructed - images[iframe]
+                recon_loss = lorentzian_loss(residuals, sigma)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 loss = recon_loss + smooth_loss
                 loss.backward()
@@ -119,80 +155,3 @@ def _run_optimization(images, tip_size, smooth_schedule, nepoch_s1, nepoch_s2):
         loss_train.append(loss_tmp)
 
     return tip.detach(), loss_train
-
-
-def _evaluate_tip(images, tip):
-    """Compute total reconstruction error for a tip estimate."""
-    total_error = 0.0
-    with torch.no_grad():
-        for iframe in range(images.shape[0]):
-            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
-            total_error += error.item()
-    return total_error
-
-
-def reconstruct_tip(images, tip_size, **kwargs):
-    """Dual-Path BTR with Automatic Strategy Selection.
-
-    Architecture: Run two optimization strategies briefly, then commit the
-    full compute budget to whichever performs better on this specific data.
-
-    Path A (Standard): Smoothing schedule from proven baseline
-            (weak → strong regularization)
-    Path B (GNC): Graduated non-convexity schedule
-            (strong → weak regularization, noise-adaptive)
-
-    Phase 1 — Race (20 epochs each, parallel):
-      Run both paths briefly. Evaluate reconstruction error.
-      Select the path with lower error.
-
-    Phase 2 — Commit (120 epochs + 60 hard-frame epochs):
-      Continue the winning path with its remaining compute budget.
-
-    This guarantees at least baseline performance (Path A wins on easy data)
-    while capturing GNC improvements on hard data (Path B wins on noisy data).
-    """
-    noise_level = estimate_noise_level(images)
-    noise_factor = max(1.0, noise_level / 1.0)
-
-    # Define two smoothing schedules
-    def schedule_standard(epoch, nepoch):
-        """Baseline schedule: weak → medium → strong."""
-        progress = epoch / nepoch
-        if progress < 40 / 140:
-            return 0.001
-        elif progress < 120 / 140:
-            return 0.005
-        else:
-            return 0.01
-
-    def schedule_gnc(epoch, nepoch):
-        """GNC schedule: strong → weak (noise-adaptive)."""
-        progress = epoch / nepoch
-        initial = 0.03 * noise_factor
-        final = 0.003
-        return initial * (final / initial) ** progress
-
-    # Phase 1: Race — 20 epochs each
-    race_epochs = 20
-    tip_a, _ = _run_optimization(images, tip_size, schedule_standard,
-                                  nepoch_s1=race_epochs, nepoch_s2=0)
-    tip_b, _ = _run_optimization(images, tip_size, schedule_gnc,
-                                  nepoch_s1=race_epochs, nepoch_s2=0)
-
-    error_a = _evaluate_tip(images, tip_a)
-    error_b = _evaluate_tip(images, tip_b)
-
-    # Phase 2: Commit to the winner
-    if error_a <= error_b:
-        selected_schedule = schedule_standard
-    else:
-        selected_schedule = schedule_gnc
-
-    tip_final, loss_train = _run_optimization(
-        images, tip_size, selected_schedule,
-        nepoch_s1=120, nepoch_s2=60
-    )
-
-    return tip_final, loss_train
