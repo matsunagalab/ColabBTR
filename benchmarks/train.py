@@ -119,11 +119,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_frame_count, largest=True
     ).indices.tolist()
 
-    # Warm restart optimizer: reset momentum and variance from Stage 1.
-    # Stage 1 momentum may encode noise artifacts; fresh start lets
-    # Stage 2 refine based only on the current (good) tip estimate.
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-
     # STAGE 2: Hard-frame refinement (reduce depth penalty for fine-tuning)
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
