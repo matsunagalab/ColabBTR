@@ -1,6 +1,7 @@
 """BTR algorithm — the agent modifies this file to improve tip reconstruction."""
 
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from tqdm.auto import tqdm
 from colabbtr.morphology import (
@@ -9,64 +10,50 @@ from colabbtr.morphology import (
 
 
 def laplacian_smoothing(tip, weight=0.01):
-    """Laplacian smoothing penalty: encourage smooth, physically plausible tips.
-
-    Penalizes local roughness: sum of squared second differences.
-    """
-    # 2nd order differences in x and y directions
+    """Laplacian smoothing penalty: encourage smooth, physically plausible tips."""
     lap_x = (tip[2:, 1:-1] - 2 * tip[1:-1, 1:-1] + tip[0:-2, 1:-1]) ** 2
     lap_y = (tip[1:-1, 2:] - 2 * tip[1:-1, 1:-1] + tip[1:-1, 0:-2]) ** 2
     roughness = torch.mean(lap_x) + torch.mean(lap_y)
     return weight * roughness
 
 
-def reconstruct_tip(images, tip_size, **kwargs):
-    """Two-stage BTR with Laplacian smoothing for physical plausibility.
+def gaussian_blur(images, kernel_size):
+    """Apply Gaussian blur to a batch of images for noise reduction.
 
-    Uses smoothness regularization to encourage physically realistic tip shapes
-    while maintaining reconstruction quality.
-
-        Input: images (tensor of size (nframe, H, W))
-               tip_size (tuple) — (tip_height, tip_width)
-        Output: tip_est (tensor), loss_train (list)
+    Args:
+        images: (N, H, W) tensor
+        kernel_size: int, must be odd
+    Returns:
+        Blurred images: (N, H, W)
     """
-    device = images.device
-    dtype = images.dtype
+    sigma = kernel_size / 3.0
+    x = torch.arange(kernel_size, device=images.device, dtype=images.dtype) - kernel_size // 2
+    kernel_1d = torch.exp(-x ** 2 / (2 * sigma ** 2))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = kernel_1d[:, None] * kernel_1d[None, :]
+    kernel_2d = kernel_2d.view(1, 1, kernel_size, kernel_size)
+
+    padding = kernel_size // 2
+    batched = images.unsqueeze(1)  # (N, 1, H, W)
+    blurred = F.conv2d(batched, kernel_2d, padding=padding)
+    return blurred.squeeze(1)  # (N, H, W)
+
+
+def _optimize_stage(images, tip, optimizer, nepoch, lr_schedule_fn,
+                    smooth_schedule_fn, loss_train):
+    """Run one stage of per-frame optimization."""
     nframe = images.shape[0]
-
-    # Initialize tip
-    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-
-    nepoch_stage1 = 140
-    nepoch_stage2 = 60
-    loss_train = []
-
-    # STAGE 1: Coarse optimization on all frames
-    for epoch in tqdm(range(nepoch_stage1), disable=True, desc="Stage 1: Coarse"):
-        if epoch < 40:
-            lr_factor = 0.6 + (epoch / 40) * 0.4
-            wd_factor = 1.0
-            smooth_weight = 0.001
-        elif epoch < 120:
-            lr_factor = 1.0
-            wd_factor = 1.0
-            smooth_weight = 0.005
-        else:
-            decay_progress = (epoch - 120) / 20
-            lr_factor = 1.0 * (0.1 ** decay_progress)
-            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
-            smooth_weight = 0.01  # Stronger smoothing in cool-down
-
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = 0.1 * lr_factor
-            param_group['weight_decay'] = 0.01 * wd_factor
+    for epoch in range(nepoch):
+        lr, wd, smooth_weight = lr_schedule_fn(epoch, nepoch)
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr
+            pg['weight_decay'] = wd
 
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-            image_reconstructed = idilation(ierosion(images[iframe, :, :], tip), tip)
-            recon_loss = torch.mean((image_reconstructed - images[iframe, :, :]) ** 2)
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             loss = recon_loss + smooth_loss
             loss.backward()
@@ -80,96 +67,144 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         loss_train.append(loss_tmp)
 
-    # STAGE 2: Evaluate frame difficulties
+
+def reconstruct_tip(images, tip_size, **kwargs):
+    """Noise-Annealed Coarse-to-Fine BTR.
+
+    Architecture: Progressively reduce image smoothing during optimization.
+    Analogous to simulated annealing / graduated non-convexity.
+
+    Phase 1: Optimize on heavily blurred images (smooth loss landscape,
+             find correct basin even with high noise)
+    Phase 2: Refine on lightly blurred images (recover medium-scale features)
+    Phase 3: Refine on original images (recover fine detail)
+    Phase 4: Hard-frame refinement (original baseline Stage 2)
+
+    This addresses the root cause of high-noise failure: the noisy loss
+    landscape has many local minima. Smoothing the images smooths the
+    landscape, enabling convergence to the correct basin.
+    """
+    device = images.device
+    dtype = images.dtype
+    nframe = images.shape[0]
+
+    # Create progressively less smoothed images
+    images_heavy = gaussian_blur(images, kernel_size=5)
+    images_light = gaussian_blur(images, kernel_size=3)
+
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    loss_train = []
+
+    # Phase 1: Heavy blur — find correct basin (40 epochs)
+    for epoch in range(40):
+        lr_factor = 0.6 + (epoch / 40) * 0.4
+        lr = 0.1 * lr_factor
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr
+            pg['weight_decay'] = 0.01
+
+        loss_tmp = 0.0
+        for iframe in range(nframe):
+            optimizer.zero_grad()
+            image_reconstructed = idilation(ierosion(images_heavy[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images_heavy[iframe]) ** 2)
+            smooth_loss = laplacian_smoothing(tip, weight=0.001)
+            loss = recon_loss + smooth_loss
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+            loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # Phase 2: Light blur — recover medium-scale features (40 epochs)
+    for epoch in range(40):
+        for pg in optimizer.param_groups:
+            pg['lr'] = 0.1
+            pg['weight_decay'] = 0.01
+
+        loss_tmp = 0.0
+        for iframe in range(nframe):
+            optimizer.zero_grad()
+            image_reconstructed = idilation(ierosion(images_light[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images_light[iframe]) ** 2)
+            smooth_loss = laplacian_smoothing(tip, weight=0.003)
+            loss = recon_loss + smooth_loss
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+            loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # Phase 3: Original images — recover fine detail (60 epochs)
+    for epoch in range(60):
+        if epoch < 40:
+            smooth_weight = 0.005
+            lr_factor = 1.0
+        else:
+            decay_progress = (epoch - 40) / 20
+            lr_factor = 0.1 ** decay_progress
+            smooth_weight = 0.01
+
+        for pg in optimizer.param_groups:
+            pg['lr'] = 0.1 * lr_factor
+            pg['weight_decay'] = 0.01
+
+        loss_tmp = 0.0
+        for iframe in range(nframe):
+            optimizer.zero_grad()
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
+            loss = recon_loss + smooth_loss
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+            loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # Phase 4: Hard-frame refinement (same as baseline Stage 2)
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
-            image_reconstructed = idilation(ierosion(images[iframe, :, :], tip), tip)
-            error = torch.mean((image_reconstructed - images[iframe, :, :]) ** 2)
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
             frame_errors.append(error.item())
 
-    # Select hardest frames (top 50% or at least 1)
     hard_frame_count = max(1, (nframe + 1) // 2)
     hard_frame_indices = torch.topk(
-        torch.tensor(frame_errors),
-        k=hard_frame_count,
-        largest=True
+        torch.tensor(frame_errors), k=hard_frame_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Intensive refinement on hard frames
-    for epoch in tqdm(range(nepoch_stage2), disable=True, desc="Stage 2: Intensive"):
-        # Cool-down schedule for final refinement
-        decay_progress = epoch / nepoch_stage2
-        lr_factor = 1.0 * (0.1 ** decay_progress)
-        wd_factor = max(0.02, 1.0 - decay_progress)
-        smooth_weight = 0.01 + 0.01 * decay_progress  # Increase smoothing toward end
+    for epoch in range(60):
+        decay_progress = epoch / 60
+        lr_factor = 0.1 ** decay_progress
+        smooth_weight = 0.01 + 0.01 * decay_progress
 
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = 0.1 * lr_factor
-            param_group['weight_decay'] = 0.01 * wd_factor
+        for pg in optimizer.param_groups:
+            pg['lr'] = 0.1 * lr_factor
+            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
 
         loss_tmp = 0.0
-        # Only optimize on hard frames, multiple passes per epoch
-        for _ in range(3):  # 3x more iterations on hard frames
+        for _ in range(3):
             for iframe in hard_frame_indices:
                 optimizer.zero_grad()
-                image_reconstructed = idilation(ierosion(images[iframe, :, :], tip), tip)
-                recon_loss = torch.mean((image_reconstructed - images[iframe, :, :]) ** 2)
+                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 loss = recon_loss + smooth_loss
                 loss.backward()
                 optimizer.step()
-
                 with torch.no_grad():
                     tip.data = torch.clamp(tip, max=0.0)
                     tip.data = translate_tip_mean(tip)
-
                 loss_tmp += loss.item()
-
         loss_train.append(loss_tmp)
 
-    # STAGE 3: Stochastic Weight Averaging (SWA)
-    # Average tip snapshots from continued optimization at constant low LR.
-    # SWA finds wider optima that generalize better (Izmailov et al., 2018).
-    # No shape assumptions — purely optimization-level improvement.
-    swa_tip = tip.data.clone()
-    swa_count = 1
-    swa_lr = 0.005
-    nepoch_swa = 30
-
-    for param_group in optimizer.param_groups:
-        param_group['lr'] = swa_lr
-        param_group['weight_decay'] = 0.001  # light regularization
-
-    for epoch in range(nepoch_swa):
-        loss_tmp = 0.0
-        for iframe in range(nframe):
-            optimizer.zero_grad()
-            image_reconstructed = idilation(ierosion(images[iframe, :, :], tip), tip)
-            recon_loss = torch.mean((image_reconstructed - images[iframe, :, :]) ** 2)
-            smooth_loss = laplacian_smoothing(tip, weight=0.01)
-            loss = recon_loss + smooth_loss
-            loss.backward()
-            optimizer.step()
-
-            with torch.no_grad():
-                tip.data = torch.clamp(tip, max=0.0)
-                tip.data = translate_tip_mean(tip)
-
-            loss_tmp += loss.item()
-
-        # Collect snapshot at end of each SWA epoch
-        with torch.no_grad():
-            swa_tip += tip.data
-            swa_count += 1
-
-        loss_train.append(loss_tmp)
-
-    # Apply SWA average
-    with torch.no_grad():
-        tip.data = swa_tip / swa_count
-        tip.data = torch.clamp(tip, max=0.0)
-        tip.data = translate_tip_mean(tip)
-
-    tip_estimate = tip.detach()
-    return tip_estimate, loss_train
+    return tip.detach(), loss_train
