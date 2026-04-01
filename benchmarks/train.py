@@ -87,13 +87,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
             pg['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
-        for iframe in range(nframe):
+        frame_order = torch.randperm(nframe).tolist()
+        for iframe in frame_order:
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
-            # Depth regularizer: alpha * mean(tip). Since tip <= 0,
-            # this is negative for deep tips → rewards depth
             depth_loss = depth_alpha * torch.mean(tip)
             loss = recon_loss + smooth_loss + depth_loss
             loss.backward()
