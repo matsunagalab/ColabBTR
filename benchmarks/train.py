@@ -42,7 +42,8 @@ def lorentzian_loss(residuals, sigma):
     produce large residuals that dominate the MSE gradient, pulling the tip
     toward wrong local minima.
     """
-    return torch.mean(torch.log1p((residuals / sigma) ** 2))
+    # Multiply by σ² so that for small residuals: σ²·log(1+(r/σ)²) ≈ r² (matches MSE)
+    return sigma ** 2 * torch.mean(torch.log1p((residuals / sigma) ** 2))
 
 
 def reconstruct_tip(images, tip_size, **kwargs):
