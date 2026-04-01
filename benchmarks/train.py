@@ -45,7 +45,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
     loss_train = []
 
     # Depth regularizer weight — counteracts bluntness bias of opening loss
-    depth_alpha = 0.005
+    depth_alpha = 0.01
 
     # STAGE 1: Coarse optimization on all frames
     for epoch in range(nepoch_stage1):
