@@ -33,32 +33,53 @@ def estimate_high_freq_energy(images):
     return sum(energies) / len(energies)
 
 
+def estimate_variance_ratio(images):
+    """Estimate bright/dark variance ratio to distinguish noise types.
+
+    Gaussian noise: ratio ~1.5-6.5 (constant variance across intensities)
+    Poisson noise: ratio >> 100 (variance scales with signal intensity)
+    No noise: ratio >> 100 (dark regions have zero variance)
+    """
+    pixel_var = torch.var(images, dim=0)
+    pixel_mean = torch.mean(images, dim=0)
+    median_val = pixel_mean.median()
+    bright_mask = pixel_mean > median_val
+    dark_mask = ~bright_mask
+    var_bright = pixel_var[bright_mask].mean().item()
+    var_dark = pixel_var[dark_mask].mean().item()
+    return var_bright / (var_dark + 1e-8)
+
+
 def reconstruct_tip(images, tip_size, **kwargs):
-    """BTR with noise-adaptive depth regularizer.
+    """BTR with noise-adaptive depth regularizer and gradient smoothing.
 
-    Key insight: The morphological opening is anti-extensive, creating a
-    bluntness bias in the loss landscape. For CLEAN images (no noise),
-    the flat tip is nearly degenerate — the optimizer has little incentive
-    to find a deeper tip. Noise naturally breaks this degeneracy.
+    Two noise-adaptive architectural components:
 
-    Architecture:
-    1. Estimate noise level from high-frequency image content
-    2. For clean data (low HF energy): apply depth regularizer to break
-       the flat-tip degeneracy → massive improvement (~70%)
-    3. For noisy data: noise already breaks degeneracy, so depth
-       regularizer is unnecessary and potentially harmful → baseline behavior
+    1. Depth regularizer (for clean data):
+       The morphological opening's anti-extensive property creates a
+       bluntness bias. For CLEAN images, the flat tip is nearly degenerate.
+       Depth penalty breaks this. For noisy data, noise already breaks it.
+
+    2. Spatial gradient smoothing (for high additive noise):
+       For high Gaussian noise, the per-pixel gradient is noisy. Spatial
+       averaging of the gradient (3×3) during early epochs provides a
+       cleaner descent direction. Disabled for Poisson noise (which has
+       different spatial structure) and clean data.
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
-    # Detect noise level to decide depth regularizer strength
+    # Detect noise characteristics
     hf_energy = estimate_high_freq_energy(images)
-    # Only apply depth penalty for clean data where flat-tip degeneracy exists
+    var_ratio = estimate_variance_ratio(images)
+    is_additive_noise = (var_ratio < 100)  # Gaussian: ~1.5-6.5, Poisson/none: >> 100
+
+    # Depth penalty: only for clean data (flat-tip degeneracy)
     if hf_energy < 0.2:
-        depth_alpha = 0.005  # breaks flat-tip degeneracy
+        depth_alpha = 0.005
     else:
-        depth_alpha = 0.0  # noise already breaks it; penalty would overshoot
+        depth_alpha = 0.0
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
@@ -67,9 +88,10 @@ def reconstruct_tip(images, tip_size, **kwargs):
     nepoch_stage2 = 60
     loss_train = []
 
-    # Gradient smoothing for noisy conditions: spatially filter the gradient
-    # to reduce noise-induced high-frequency artifacts in early optimization
-    use_grad_smooth = hf_energy > 0.5
+    # Gradient smoothing: only for high ADDITIVE noise (Gaussian)
+    # Poisson noise has signal-dependent spatial structure that
+    # should not be smoothed. Detected via variance ratio.
+    use_grad_smooth = (hf_energy > 0.5) and is_additive_noise
 
     # STAGE 1: Coarse optimization on all frames
     for epoch in range(nepoch_stage1):
