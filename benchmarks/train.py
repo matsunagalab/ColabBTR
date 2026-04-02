@@ -1,6 +1,7 @@
 """BTR algorithm — the agent modifies this file to improve tip reconstruction."""
 
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from colabbtr.morphology import (
     idilation, ierosion, translate_tip_mean
@@ -66,6 +67,10 @@ def reconstruct_tip(images, tip_size, **kwargs):
     nepoch_stage2 = 60
     loss_train = []
 
+    # Gradient smoothing for noisy conditions: spatially filter the gradient
+    # to reduce noise-induced high-frequency artifacts in early optimization
+    use_grad_smooth = hf_energy > 0.5
+
     # STAGE 1: Coarse optimization on all frames
     for epoch in range(nepoch_stage1):
         if epoch < 40:
@@ -97,6 +102,16 @@ def reconstruct_tip(images, tip_size, **kwargs):
             depth_loss = depth_alpha * torch.mean(tip)
             loss = recon_loss + smooth_loss + depth_loss
             loss.backward()
+
+            # Spatial gradient smoothing for noisy conditions (early epochs only)
+            # Removes high-frequency noise from the gradient without modifying
+            # the forward pass. Helps the optimizer find the correct basin.
+            if use_grad_smooth and epoch < 40:
+                with torch.no_grad():
+                    g = tip.grad.unsqueeze(0).unsqueeze(0)
+                    g_smooth = F.avg_pool2d(g, kernel_size=3, stride=1, padding=1)
+                    tip.grad.data = g_smooth.squeeze(0).squeeze(0)
+
             optimizer.step()
 
             with torch.no_grad():
