@@ -1,7 +1,6 @@
 """BTR algorithm — the agent modifies this file to improve tip reconstruction."""
 
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 from colabbtr.morphology import (
     idilation, ierosion, translate_tip_mean
@@ -27,25 +26,73 @@ def estimate_high_freq_energy(images):
     return sum(energies) / len(energies)
 
 
-def gaussian_blur(images, kernel_size=3):
-    """Apply Gaussian blur to a batch of images."""
-    sigma = kernel_size / 3.0
-    x = torch.arange(kernel_size, device=images.device, dtype=images.dtype) - kernel_size // 2
-    k1d = torch.exp(-x ** 2 / (2 * sigma ** 2))
-    k1d = k1d / k1d.sum()
-    k2d = (k1d[:, None] * k1d[None, :]).view(1, 1, kernel_size, kernel_size)
-    return F.conv2d(images.unsqueeze(1), k2d, padding=kernel_size // 2).squeeze(1)
+def reconstruct_tip(images, tip_size, **kwargs):
+    """Noise-adaptive BTR with physical preprocessing and extended compute.
 
+    Three regimes based on image noise level:
 
-def _run_stage(images, tip, optimizer, nepoch, lr_schedule, smooth_schedule,
-               depth_alpha, loss_train):
-    """Run one optimization stage with per-frame updates."""
+    1. Clean data (HF < 0.2):
+       Depth regularizer to break the flat-tip degeneracy.
+
+    2. Moderate noise (HF 0.2–0.5):
+       Standard baseline.
+
+    3. High noise (HF > 0.5):
+       Preprocessing: clamp negative pixels to 0.
+         (Physical constraint: AFM image = dilation(surface, tip) >= 0.
+          44% of pixels are negative for sigma=1.0 — all noise artifacts.)
+       Extended compute: 200 + 100 epochs (vs 140 + 60 baseline).
+       Stronger smoothing schedule (more regularization for noisy data).
+    """
+    device = images.device
+    dtype = images.dtype
     nframe = images.shape[0]
-    for epoch in range(nepoch):
-        lr, wd, smooth_weight = lr_schedule(epoch, nepoch)
+
+    hf_energy = estimate_high_freq_energy(images)
+
+    # Depth regularizer for clean data only
+    depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
+
+    # Physical preprocessing for high noise: image >= 0 always holds
+    # for noiseless AFM images. Clamping removes guaranteed noise artifacts
+    # without altering the morphological structure.
+    if hf_energy > 0.5:
+        images = torch.clamp(images, min=0.0)
+
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    loss_train = []
+
+    # Noise-adaptive compute budget and smoothing
+    if hf_energy > 0.5:
+        nepoch_stage1 = 200  # more time to converge through noise
+        nepoch_stage2 = 100
+        smooth_base = 0.008  # stronger smoothing for noisy data
+    else:
+        nepoch_stage1 = 140
+        nepoch_stage2 = 60
+        smooth_base = 0.005
+
+    # STAGE 1: Optimization on all frames
+    for epoch in range(nepoch_stage1):
+        progress = epoch / nepoch_stage1
+        if progress < 0.3:
+            lr_factor = 0.6 + (progress / 0.3) * 0.4
+            wd_factor = 1.0
+            smooth_weight = smooth_base * 0.2
+        elif progress < 0.85:
+            lr_factor = 1.0
+            wd_factor = 1.0
+            smooth_weight = smooth_base
+        else:
+            decay = (progress - 0.85) / 0.15
+            lr_factor = 0.1 ** decay
+            wd_factor = max(0.05, 1.0 - decay * 0.95)
+            smooth_weight = smooth_base * 2.0
+
         for pg in optimizer.param_groups:
-            pg['lr'] = lr
-            pg['weight_decay'] = wd
+            pg['lr'] = 0.1 * lr_factor
+            pg['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
@@ -65,19 +112,28 @@ def _run_stage(images, tip, optimizer, nepoch, lr_schedule, smooth_schedule,
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
+    # Evaluate frame errors for hard-frame selection
+    frame_errors = []
+    with torch.no_grad():
+        for iframe in range(nframe):
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            frame_errors.append(error.item())
 
-def _run_hard_frame_stage(images, tip, optimizer, nepoch, hard_indices,
-                          depth_alpha, loss_train):
-    """Run hard-frame refinement stage."""
-    n_hard = len(hard_indices)
-    for epoch in range(nepoch):
-        decay = epoch / nepoch
-        lr = 0.1 * (0.1 ** decay)
-        smooth_weight = 0.01 + 0.01 * decay
+    hard_count = max(1, (nframe + 1) // 2)
+    hard_indices = torch.topk(
+        torch.tensor(frame_errors), k=hard_count, largest=True
+    ).indices.tolist()
+
+    # STAGE 2: Hard-frame refinement
+    for epoch in range(nepoch_stage2):
+        decay = epoch / nepoch_stage2
+        lr_factor = 0.1 ** decay
+        smooth_weight = smooth_base * 2.0 + smooth_base * decay
         depth_weight = depth_alpha * (1.0 - 0.5 * decay)
 
         for pg in optimizer.param_groups:
-            pg['lr'] = lr
+            pg['lr'] = 0.1 * lr_factor
             pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay)
 
         loss_tmp = 0.0
@@ -98,110 +154,5 @@ def _run_hard_frame_stage(images, tip, optimizer, nepoch, hard_indices,
 
                 loss_tmp += loss.item()
         loss_train.append(loss_tmp)
-
-
-def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with preprocessing and extended compute.
-
-    Three regimes based on image noise level:
-
-    1. Clean data (HF < 0.2):
-       Depth regularizer to break the flat-tip degeneracy.
-       Standard compute budget.
-
-    2. Moderate noise (HF 0.2–0.5):
-       Standard baseline. No preprocessing needed.
-
-    3. High noise (HF > 0.5):
-       Preprocessing: clamp negatives (physical: image ≥ 0) + Gaussian blur.
-       Phase 0: BTR on preprocessed images (smooth landscape → correct basin).
-       Phase 1: BTR on original images (recover fine detail).
-       Phase 2: Extended hard-frame refinement.
-       Larger compute budget.
-    """
-    device = images.device
-    dtype = images.dtype
-    nframe = images.shape[0]
-
-    hf_energy = estimate_high_freq_energy(images)
-    depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
-
-    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-    loss_train = []
-
-    # Standard LR schedule
-    def lr_schedule_warmup(epoch, nepoch):
-        progress = epoch / nepoch
-        if progress < 40 / 140:
-            lr_factor = 0.6 + (progress / (40 / 140)) * 0.4
-            return 0.1 * lr_factor, 0.01, 0.001
-        elif progress < 120 / 140:
-            return 0.1, 0.01, 0.005
-        else:
-            decay = (progress - 120 / 140) / (20 / 140)
-            return 0.1 * (0.1 ** decay), 0.01 * max(0.05, 1.0 - decay * 0.95), 0.01
-
-    def lr_schedule_steady(epoch, nepoch):
-        return 0.1, 0.01, 0.005
-
-    def lr_schedule_decay(epoch, nepoch):
-        decay = epoch / nepoch
-        return 0.1 * (0.5 ** decay), 0.01 * max(0.1, 1.0 - decay), 0.008
-
-    if hf_energy > 0.5:
-        # ─── HIGH NOISE REGIME ──────────────────────────────────────
-        # Preprocessing: physical constraint + Gaussian blur
-        images_denoised = torch.clamp(images, min=0.0)  # image ≥ 0 (physical)
-        images_denoised = gaussian_blur(images_denoised, kernel_size=3)
-
-        # Phase 0: BTR on denoised images → find correct basin
-        _run_stage(images_denoised, tip, optimizer, nepoch=100,
-                   lr_schedule=lr_schedule_warmup,
-                   smooth_schedule=None, depth_alpha=0.0, loss_train=loss_train)
-
-        # Phase 1: Refine on original images → recover fine detail
-        _run_stage(images, tip, optimizer, nepoch=100,
-                   lr_schedule=lr_schedule_decay,
-                   smooth_schedule=None, depth_alpha=0.0, loss_train=loss_train)
-
-        # Phase 2: Extended hard-frame refinement
-        frame_errors = []
-        with torch.no_grad():
-            for iframe in range(nframe):
-                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                error = torch.mean((image_reconstructed - images[iframe]) ** 2)
-                frame_errors.append(error.item())
-
-        hard_count = max(1, (nframe + 1) // 2)
-        hard_indices = torch.topk(
-            torch.tensor(frame_errors), k=hard_count, largest=True
-        ).indices.tolist()
-
-        _run_hard_frame_stage(images, tip, optimizer, nepoch=80,
-                              hard_indices=hard_indices, depth_alpha=0.0,
-                              loss_train=loss_train)
-    else:
-        # ─── CLEAN / MODERATE NOISE REGIME ──────────────────────────
-        _run_stage(images, tip, optimizer, nepoch=140,
-                   lr_schedule=lr_schedule_warmup,
-                   smooth_schedule=None, depth_alpha=depth_alpha,
-                   loss_train=loss_train)
-
-        frame_errors = []
-        with torch.no_grad():
-            for iframe in range(nframe):
-                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                error = torch.mean((image_reconstructed - images[iframe]) ** 2)
-                frame_errors.append(error.item())
-
-        hard_count = max(1, (nframe + 1) // 2)
-        hard_indices = torch.topk(
-            torch.tensor(frame_errors), k=hard_count, largest=True
-        ).indices.tolist()
-
-        _run_hard_frame_stage(images, tip, optimizer, nepoch=60,
-                              hard_indices=hard_indices, depth_alpha=depth_alpha,
-                              loss_train=loss_train)
 
     return tip.detach(), loss_train
