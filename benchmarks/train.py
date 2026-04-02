@@ -59,16 +59,8 @@ def reconstruct_tip(images, tip_size, **kwargs):
     else:
         depth_alpha = 0.0  # noise already breaks it; penalty would overshoot
 
-    # Weight decay pushes tip toward zero (flat), reinforcing bluntness bias.
-    # For noisy data, this is counterproductive — the optimizer needs freedom
-    # to find the correct depth. Laplacian smoothing handles shape regularization.
-    if hf_energy > 0.5:
-        base_wd = 0.001  # reduced: less bluntness bias for noisy conditions
-    else:
-        base_wd = 0.01  # standard for clean/low-noise
-
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=base_wd)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
 
     nepoch_stage1 = 140
     nepoch_stage2 = 60
@@ -92,7 +84,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = base_wd * wd_factor
+            pg['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
