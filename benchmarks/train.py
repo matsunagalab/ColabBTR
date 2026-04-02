@@ -128,11 +128,13 @@ def reconstruct_tip(images, tip_size, **kwargs):
             # Spatial gradient smoothing for noisy conditions (early epochs only)
             # Removes high-frequency noise from the gradient without modifying
             # the forward pass. Helps the optimizer find the correct basin.
-            if use_grad_smooth and epoch < 20:
+            if use_grad_smooth and epoch < 40:
                 with torch.no_grad():
                     g = tip.grad.unsqueeze(0).unsqueeze(0)
                     g_smooth = F.avg_pool2d(g, kernel_size=3, stride=1, padding=1)
-                    tip.grad.data = g_smooth.squeeze(0).squeeze(0)
+                    # Blend: preserve fine detail (80% original) with smoothing (20%)
+                    # Less aggressive than full replacement, better for sharp tips
+                    tip.grad.data = 0.8 * tip.grad.data + 0.2 * g_smooth.squeeze(0).squeeze(0)
 
             optimizer.step()
 
