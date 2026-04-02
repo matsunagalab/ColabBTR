@@ -29,8 +29,8 @@ def estimate_high_freq_energy(images):
 def estimate_variance_ratio(images):
     """Bright/dark variance ratio to distinguish noise types.
 
-    Gaussian noise: ratio ~1.5-6.5 (constant variance)
-    Poisson/none: ratio >> 100 (signal-dependent variance)
+    Gaussian: ratio ~1.5-6.5 (constant variance).
+    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
     """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
@@ -41,9 +41,9 @@ def estimate_variance_ratio(images):
 
 
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with physical preprocessing and extended compute.
+    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
 
-    Four regimes based on noise detection:
+    Four regimes based on automatic noise detection:
 
     1. Clean data (HF < 0.2):
        Depth regularizer to break the flat-tip degeneracy.
@@ -51,59 +51,62 @@ def reconstruct_tip(images, tip_size, **kwargs):
     2. Moderate noise (HF 0.2–0.5):
        Standard baseline.
 
-    3. High additive noise (HF > 0.5, variance_ratio < 100 → Gaussian):
-       Preprocessing: clamp negative pixels to 0 (physical constraint).
-       Extended compute: 200 + 100 epochs.
+    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
+       Clamp negative pixels to 0 (physical: image >= 0).
+       Extended compute: 200 + 100 epochs (vs 140 + 60).
        Stronger smoothing.
 
-    4. High signal-dependent noise (HF > 0.5, variance_ratio > 100 → Poisson):
-       Standard baseline (clamp and extended epochs hurt Poisson).
+    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
+       Standard baseline (clamping + extended compute hurt Poisson).
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
+    # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
-    is_high_additive_noise = (hf_energy > 0.5) and (var_ratio < 100)
+    is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
     # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
-    # Physical preprocessing: clamp negatives for high additive noise only
-    if is_high_additive_noise:
+    # Physical preprocessing for high Gaussian noise
+    if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # Noise-adaptive compute budget and smoothing
-    if is_high_additive_noise:
-        nepoch_stage1 = 200  # more time to converge through noise
+    # Noise-adaptive epoch counts
+    if is_high_gaussian:
+        nepoch_stage1 = 200
         nepoch_stage2 = 100
-        smooth_base = 0.008  # stronger smoothing for noisy data
     else:
         nepoch_stage1 = 140
         nepoch_stage2 = 60
-        smooth_base = 0.005
 
     # STAGE 1: Optimization on all frames
     for epoch in range(nepoch_stage1):
-        progress = epoch / nepoch_stage1
-        if progress < 0.3:
-            lr_factor = 0.6 + (progress / 0.3) * 0.4
+        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
+        epoch_40 = int(nepoch_stage1 * 40 / 140)
+        epoch_120 = int(nepoch_stage1 * 120 / 140)
+        epoch_cooldown = nepoch_stage1 - epoch_120
+
+        if epoch < epoch_40:
+            lr_factor = 0.6 + (epoch / epoch_40) * 0.4
             wd_factor = 1.0
-            smooth_weight = smooth_base * 0.2
-        elif progress < 0.85:
+            smooth_weight = 0.001 if not is_high_gaussian else 0.002
+        elif epoch < epoch_120:
             lr_factor = 1.0
             wd_factor = 1.0
-            smooth_weight = smooth_base
+            smooth_weight = 0.005 if not is_high_gaussian else 0.008
         else:
-            decay = (progress - 0.85) / 0.15
-            lr_factor = 0.1 ** decay
-            wd_factor = max(0.05, 1.0 - decay * 0.95)
-            smooth_weight = smooth_base * 2.0
+            decay_progress = (epoch - epoch_120) / max(1, epoch_cooldown)
+            lr_factor = 0.1 ** decay_progress
+            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
+            smooth_weight = 0.01 if not is_high_gaussian else 0.016
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
@@ -142,14 +145,14 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
     # STAGE 2: Hard-frame refinement
     for epoch in range(nepoch_stage2):
-        decay = epoch / nepoch_stage2
-        lr_factor = 0.1 ** decay
-        smooth_weight = smooth_base * 2.0 + smooth_base * decay
-        depth_weight = depth_alpha * (1.0 - 0.5 * decay)
+        decay_progress = epoch / nepoch_stage2
+        lr_factor = 0.1 ** decay_progress
+        smooth_weight = 0.01 + 0.01 * decay_progress
+        depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay)
+            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
 
         loss_tmp = 0.0
         for _ in range(3):
