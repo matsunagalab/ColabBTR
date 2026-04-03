@@ -27,7 +27,11 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
-    """Bright/dark variance ratio to distinguish noise types."""
+    """Bright/dark variance ratio to distinguish noise types.
+
+    Gaussian: ratio ~1.5-6.5 (constant variance).
+    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
+    """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -37,20 +41,23 @@ def estimate_variance_ratio(images):
 
 
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with auto-determined lambda.
+    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
 
-    Lambda (weight_decay) is set based on noise regime:
-    - Clean data (HF < 0.2): lambda=0.001
-      Combined with depth regularizer, this gives RMSD 0.15 vs 0.44
-      at lambda=0.01. Low lambda removes the pressure toward flat tip,
-      complementing the depth penalty.
-    - Noisy data: lambda=0.01 (baseline)
-      Full-pipeline A/B tests confirm 0.01 is optimal for both
-      Gaussian and Poisson when Stage 2 refinement is included.
+    Four regimes based on automatic noise detection:
 
-    Other noise-adaptive components (unchanged from 60ec965):
-    - Depth regularizer for clean data
-    - Negative clamping + extended epochs for high Gaussian noise
+    1. Clean data (HF < 0.2):
+       Depth regularizer to break the flat-tip degeneracy.
+
+    2. Moderate noise (HF 0.2–0.5):
+       Standard baseline.
+
+    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
+       Clamp negative pixels to 0 (physical: image >= 0).
+       Extended compute: 200 + 100 epochs (vs 140 + 60).
+       Stronger smoothing.
+
+    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
+       Standard baseline (clamping + extended compute hurt Poisson).
     """
     device = images.device
     dtype = images.dtype
@@ -61,20 +68,15 @@ def reconstruct_tip(images, tip_size, **kwargs):
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
-    # Noise-adaptive lambda and depth regularizer
-    if hf_energy < 0.2:
-        optimal_wd = 0.001  # low wd + depth penalty for clean data
-        depth_alpha = 0.005
-    else:
-        optimal_wd = 0.01  # standard for noisy data
-        depth_alpha = 0.0
+    # Depth regularizer for clean data only
+    depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
     # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=optimal_wd)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
     # Noise-adaptive epoch counts
@@ -85,8 +87,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
         nepoch_stage1 = 140
         nepoch_stage2 = 60
 
-    # STAGE 1
+    # STAGE 1: Optimization on all frames
     for epoch in range(nepoch_stage1):
+        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
         epoch_40 = int(nepoch_stage1 * 40 / 140)
         epoch_120 = int(nepoch_stage1 * 120 / 140)
         epoch_cooldown = nepoch_stage1 - epoch_120
@@ -107,7 +110,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = optimal_wd * wd_factor
+            pg['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
@@ -127,7 +130,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Frame error evaluation
+    # Evaluate frame errors for hard-frame selection
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -149,7 +152,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = optimal_wd * max(0.02, 1.0 - decay_progress)
+            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
 
         loss_tmp = 0.0
         for _ in range(3):
