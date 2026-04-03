@@ -27,11 +27,7 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
-    """Bright/dark variance ratio to distinguish noise types.
-
-    Gaussian: ratio ~1.5-6.5 (constant variance).
-    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
-    """
+    """Bright/dark variance ratio to distinguish noise types."""
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -40,24 +36,78 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
+def _quick_btr(images, tip_size, weight_decay, nepoch, smooth_weight=0.005):
+    """Run a short BTR for lambda cross-validation."""
+    device, dtype, nframe = images.device, images.dtype, images.shape[0]
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    opt = optim.AdamW([tip], lr=0.1, weight_decay=weight_decay)
+    for epoch in range(nepoch):
+        for iframe in range(nframe):
+            opt.zero_grad()
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            loss = torch.mean((recon - images[iframe]) ** 2)
+            loss = loss + laplacian_smoothing(tip, weight=smooth_weight)
+            loss.backward()
+            opt.step()
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+    return tip.detach()
+
+
+def select_lambda(images, tip_size, candidates, nepoch_cv=50):
+    """Select optimal weight_decay via 2-fold cross-validation.
+
+    Split frames into two halves. For each lambda candidate, train on
+    one half and evaluate reconstruction loss on the other. Select the
+    lambda with the lowest mean validation loss.
+
+    Cost: len(candidates) * 2 folds * nepoch_cv * (nframe/2) forward passes.
+    With 4 candidates, 50 epochs, 10 frames: ~4000 forward passes (~12s).
+    """
+    nframe = images.shape[0]
+    half = nframe // 2
+
+    best_lambda = candidates[len(candidates) // 2]  # default: middle value
+    best_val_loss = float('inf')
+
+    for lam in candidates:
+        total_val_loss = 0.0
+
+        for fold in range(2):
+            if fold == 0:
+                train_imgs = images[:half]
+                val_imgs = images[half:]
+            else:
+                train_imgs = images[half:]
+                val_imgs = images[:half]
+
+            tip = _quick_btr(train_imgs, tip_size, weight_decay=lam, nepoch=nepoch_cv)
+
+            with torch.no_grad():
+                for i in range(val_imgs.shape[0]):
+                    recon = idilation(ierosion(val_imgs[i], tip), tip)
+                    total_val_loss += torch.mean((recon - val_imgs[i]) ** 2).item()
+
+        if total_val_loss < best_val_loss:
+            best_val_loss = total_val_loss
+            best_lambda = lam
+
+    return best_lambda
+
+
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
+    """Noise-adaptive BTR with auto-selected lambda (weight_decay).
 
-    Four regimes based on automatic noise detection:
+    Architecture:
+    1. Noise detection (HF energy + variance ratio)
+    2. Lambda auto-selection via 2-fold cross-validation
+    3. Full BTR with selected lambda + noise-specific adaptations
 
-    1. Clean data (HF < 0.2):
-       Depth regularizer to break the flat-tip degeneracy.
-
-    2. Moderate noise (HF 0.2–0.5):
-       Standard baseline.
-
-    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
-       Clamp negative pixels to 0 (physical: image >= 0).
-       Extended compute: 200 + 100 epochs (vs 140 + 60).
-       Stronger smoothing.
-
-    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
-       Standard baseline (clamping + extended compute hurt Poisson).
+    Lambda candidates are chosen based on noise regime:
+    - Clean/moderate: [0.001, 0.003, 0.01, 0.03]
+    - High Gaussian: [0.0003, 0.001, 0.003, 0.01]
+      (lower range because clamping already regularizes)
     """
     device = images.device
     dtype = images.dtype
@@ -73,10 +123,22 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
     # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
-        images = torch.clamp(images, min=0.0)
+        images_for_btr = torch.clamp(images, min=0.0)
+    else:
+        images_for_btr = images
 
+    # Auto-select lambda via cross-validation
+    if is_high_gaussian:
+        lambda_candidates = [0.0003, 0.001, 0.003, 0.01]
+    else:
+        lambda_candidates = [0.001, 0.003, 0.01, 0.03]
+
+    optimal_lambda = select_lambda(images_for_btr, tip_size, lambda_candidates,
+                                   nepoch_cv=50)
+
+    # Main BTR with selected lambda
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=optimal_lambda)
     loss_train = []
 
     # Noise-adaptive epoch counts
@@ -87,9 +149,8 @@ def reconstruct_tip(images, tip_size, **kwargs):
         nepoch_stage1 = 140
         nepoch_stage2 = 60
 
-    # STAGE 1: Optimization on all frames
+    # STAGE 1
     for epoch in range(nepoch_stage1):
-        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
         epoch_40 = int(nepoch_stage1 * 40 / 140)
         epoch_120 = int(nepoch_stage1 * 120 / 140)
         epoch_cooldown = nepoch_stage1 - epoch_120
@@ -110,13 +171,13 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * wd_factor
+            pg['weight_decay'] = optimal_lambda * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            image_reconstructed = idilation(ierosion(images_for_btr[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images_for_btr[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
             loss = recon_loss + smooth_loss + depth_loss
@@ -130,12 +191,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Evaluate frame errors for hard-frame selection
+    # Frame error evaluation for hard-frame selection
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
-            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            image_reconstructed = idilation(ierosion(images_for_btr[iframe], tip), tip)
+            error = torch.mean((image_reconstructed - images_for_btr[iframe]) ** 2)
             frame_errors.append(error.item())
 
     hard_count = max(1, (nframe + 1) // 2)
@@ -152,14 +213,14 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
+            pg['weight_decay'] = optimal_lambda * max(0.02, 1.0 - decay_progress)
 
         loss_tmp = 0.0
         for _ in range(3):
             for iframe in hard_indices:
                 optimizer.zero_grad()
-                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+                image_reconstructed = idilation(ierosion(images_for_btr[iframe], tip), tip)
+                recon_loss = torch.mean((image_reconstructed - images_for_btr[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
