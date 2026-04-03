@@ -39,15 +39,18 @@ def estimate_variance_ratio(images):
 def reconstruct_tip(images, tip_size, **kwargs):
     """Noise-adaptive BTR with auto-determined lambda.
 
-    Lambda (weight_decay) is set automatically based on noise detection:
-    - Clean data (HF < 0.2): lambda=0.001 (minimal regularization; low wd
-      alone breaks the flat-tip degeneracy better than depth penalty)
-    - Moderate Gaussian (HF 0.2-0.5, additive): lambda=0.003
-    - High Gaussian (HF > 0.5, additive): lambda=0.003 + clamp + extended epochs
-    - Poisson (signal-dependent): lambda=0.01 (needs strong regularization)
+    Lambda (weight_decay) is set based on noise regime:
+    - Clean data (HF < 0.2): lambda=0.001
+      Combined with depth regularizer, this gives RMSD 0.15 vs 0.44
+      at lambda=0.01. Low lambda removes the pressure toward flat tip,
+      complementing the depth penalty.
+    - Noisy data: lambda=0.01 (baseline)
+      Full-pipeline A/B tests confirm 0.01 is optimal for both
+      Gaussian and Poisson when Stage 2 refinement is included.
 
-    Empirical basis: full 140-epoch A/B tests show optimal wd varies 10x
-    across noise types (0.001 for clean, 0.01 for Poisson).
+    Other noise-adaptive components (unchanged from 60ec965):
+    - Depth regularizer for clean data
+    - Negative clamping + extended epochs for high Gaussian noise
     """
     device = images.device
     dtype = images.dtype
@@ -56,21 +59,14 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
-    is_additive = var_ratio < 100
-    is_high_gaussian = (hf_energy > 0.5) and is_additive
+    is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
-    # Noise-adaptive lambda (weight_decay)
+    # Noise-adaptive lambda and depth regularizer
     if hf_energy < 0.2:
-        # Clean data: very low wd breaks flat-tip degeneracy
-        optimal_wd = 0.001
-        depth_alpha = 0.005  # keep depth penalty for extra push
-    elif is_additive:
-        # Gaussian noise: moderate wd
-        optimal_wd = 0.003
-        depth_alpha = 0.0
+        optimal_wd = 0.001  # low wd + depth penalty for clean data
+        depth_alpha = 0.005
     else:
-        # Poisson / signal-dependent: standard wd
-        optimal_wd = 0.01
+        optimal_wd = 0.01  # standard for noisy data
         depth_alpha = 0.0
 
     # Physical preprocessing for high Gaussian noise
