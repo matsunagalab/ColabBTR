@@ -36,78 +36,18 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
-def _quick_btr(images, tip_size, weight_decay, nepoch, smooth_weight=0.005):
-    """Run a short BTR for lambda cross-validation."""
-    device, dtype, nframe = images.device, images.dtype, images.shape[0]
-    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    opt = optim.AdamW([tip], lr=0.1, weight_decay=weight_decay)
-    for epoch in range(nepoch):
-        for iframe in range(nframe):
-            opt.zero_grad()
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            loss = torch.mean((recon - images[iframe]) ** 2)
-            loss = loss + laplacian_smoothing(tip, weight=smooth_weight)
-            loss.backward()
-            opt.step()
-            with torch.no_grad():
-                tip.data = torch.clamp(tip, max=0.0)
-                tip.data = translate_tip_mean(tip)
-    return tip.detach()
-
-
-def select_lambda(images, tip_size, candidates, nepoch_cv=50):
-    """Select optimal weight_decay via 2-fold cross-validation.
-
-    Split frames into two halves. For each lambda candidate, train on
-    one half and evaluate reconstruction loss on the other. Select the
-    lambda with the lowest mean validation loss.
-
-    Cost: len(candidates) * 2 folds * nepoch_cv * (nframe/2) forward passes.
-    With 4 candidates, 50 epochs, 10 frames: ~4000 forward passes (~12s).
-    """
-    nframe = images.shape[0]
-    half = nframe // 2
-
-    best_lambda = candidates[len(candidates) // 2]  # default: middle value
-    best_val_loss = float('inf')
-
-    for lam in candidates:
-        total_val_loss = 0.0
-
-        for fold in range(2):
-            if fold == 0:
-                train_imgs = images[:half]
-                val_imgs = images[half:]
-            else:
-                train_imgs = images[half:]
-                val_imgs = images[:half]
-
-            tip = _quick_btr(train_imgs, tip_size, weight_decay=lam, nepoch=nepoch_cv)
-
-            with torch.no_grad():
-                for i in range(val_imgs.shape[0]):
-                    recon = idilation(ierosion(val_imgs[i], tip), tip)
-                    total_val_loss += torch.mean((recon - val_imgs[i]) ** 2).item()
-
-        if total_val_loss < best_val_loss:
-            best_val_loss = total_val_loss
-            best_lambda = lam
-
-    return best_lambda
-
-
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with auto-selected lambda (weight_decay).
+    """Noise-adaptive BTR with auto-determined lambda.
 
-    Architecture:
-    1. Noise detection (HF energy + variance ratio)
-    2. Lambda auto-selection via 2-fold cross-validation
-    3. Full BTR with selected lambda + noise-specific adaptations
+    Lambda (weight_decay) is set automatically based on noise detection:
+    - Clean data (HF < 0.2): lambda=0.001 (minimal regularization; low wd
+      alone breaks the flat-tip degeneracy better than depth penalty)
+    - Moderate Gaussian (HF 0.2-0.5, additive): lambda=0.003
+    - High Gaussian (HF > 0.5, additive): lambda=0.003 + clamp + extended epochs
+    - Poisson (signal-dependent): lambda=0.01 (needs strong regularization)
 
-    Lambda candidates are chosen based on noise regime:
-    - Clean/moderate: [0.001, 0.003, 0.01, 0.03]
-    - High Gaussian: [0.0003, 0.001, 0.003, 0.01]
-      (lower range because clamping already regularizes)
+    Empirical basis: full 140-epoch A/B tests show optimal wd varies 10x
+    across noise types (0.001 for clean, 0.01 for Poisson).
     """
     device = images.device
     dtype = images.dtype
@@ -116,29 +56,29 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
-    is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
+    is_additive = var_ratio < 100
+    is_high_gaussian = (hf_energy > 0.5) and is_additive
 
-    # Depth regularizer for clean data only
-    depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
+    # Noise-adaptive lambda (weight_decay)
+    if hf_energy < 0.2:
+        # Clean data: very low wd breaks flat-tip degeneracy
+        optimal_wd = 0.001
+        depth_alpha = 0.005  # keep depth penalty for extra push
+    elif is_additive:
+        # Gaussian noise: moderate wd
+        optimal_wd = 0.003
+        depth_alpha = 0.0
+    else:
+        # Poisson / signal-dependent: standard wd
+        optimal_wd = 0.01
+        depth_alpha = 0.0
 
     # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
-        images_for_btr = torch.clamp(images, min=0.0)
-    else:
-        images_for_btr = images
+        images = torch.clamp(images, min=0.0)
 
-    # Auto-select lambda via cross-validation
-    if is_high_gaussian:
-        lambda_candidates = [0.0003, 0.001, 0.003, 0.01]
-    else:
-        lambda_candidates = [0.001, 0.003, 0.01, 0.03]
-
-    optimal_lambda = select_lambda(images_for_btr, tip_size, lambda_candidates,
-                                   nepoch_cv=50)
-
-    # Main BTR with selected lambda
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=optimal_lambda)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=optimal_wd)
     loss_train = []
 
     # Noise-adaptive epoch counts
@@ -171,13 +111,13 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = optimal_lambda * wd_factor
+            pg['weight_decay'] = optimal_wd * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-            image_reconstructed = idilation(ierosion(images_for_btr[iframe], tip), tip)
-            recon_loss = torch.mean((image_reconstructed - images_for_btr[iframe]) ** 2)
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
             loss = recon_loss + smooth_loss + depth_loss
@@ -191,12 +131,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Frame error evaluation for hard-frame selection
+    # Frame error evaluation
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
-            image_reconstructed = idilation(ierosion(images_for_btr[iframe], tip), tip)
-            error = torch.mean((image_reconstructed - images_for_btr[iframe]) ** 2)
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
             frame_errors.append(error.item())
 
     hard_count = max(1, (nframe + 1) // 2)
@@ -213,14 +153,14 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = optimal_lambda * max(0.02, 1.0 - decay_progress)
+            pg['weight_decay'] = optimal_wd * max(0.02, 1.0 - decay_progress)
 
         loss_tmp = 0.0
         for _ in range(3):
             for iframe in hard_indices:
                 optimizer.zero_grad()
-                image_reconstructed = idilation(ierosion(images_for_btr[iframe], tip), tip)
-                recon_loss = torch.mean((image_reconstructed - images_for_btr[iframe]) ** 2)
+                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
