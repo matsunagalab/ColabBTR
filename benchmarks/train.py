@@ -241,18 +241,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
         nepoch_stage1 = 140
         nepoch_stage2 = 60
 
-    # Auto-select lambda:
-    # - Clean data (HF < 0.2): BO GP-1SE selects optimal lambda (~0.0002-0.0004)
-    # - Noisy data: fixed 0.01 (CV/BO validation loss doesn't correlate with
-    #   RMSD when noise is present; tested and confirmed)
-    if hf_energy < 0.2:
-        optimal_wd = select_lambda_bo_1se(
-            images, tip_size, depth_alpha,
-            nepoch_s1=nepoch_stage1, nepoch_s2=nepoch_stage2,
-            n_eval=6, log_min=-4.0, log_max=-0.5,
-        )
-    else:
-        optimal_wd = 0.01
+    # Auto-select lambda via BO + GP-1SE
+    optimal_wd = select_lambda_bo_1se(
+        images, tip_size, depth_alpha,
+        nepoch_s1=nepoch_stage1, nepoch_s2=nepoch_stage2,
+        n_eval=6, log_min=-4.0, log_max=-0.5,
+    )
 
     # Full BTR with selected lambda on all frames
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
