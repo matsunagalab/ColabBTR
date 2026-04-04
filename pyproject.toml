@@ -12,6 +12,8 @@ authors = [{name = "Yasuhiro Matsunaga", email = "ymatsunaga@mail.saitama-u.ac.j
 dependencies = [
     "torch",
     "tqdm",
+    "numpy",
+    "scipy",
     "libasd @ git+https://github.com/matsunagalab/libasd",
 ]
 
