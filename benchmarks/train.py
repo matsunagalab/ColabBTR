@@ -34,20 +34,136 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
+def _single_run_btr(images, tip_size, depth_alpha, is_high_gaussian,
+                    nepoch_s1, nepoch_s2, shuffle_seed=None):
+    """Single BTR run with optional frame shuffling."""
+    device = images.device
+    dtype = images.dtype
+    nframe = images.shape[0]
+
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    loss_train = []
+
+    # Optional: create a frame order generator for shuffling
+    if shuffle_seed is not None:
+        rng = torch.Generator()
+        rng.manual_seed(shuffle_seed)
+    else:
+        rng = None
+
+    # STAGE 1
+    for epoch in range(nepoch_s1):
+        epoch_40 = int(nepoch_s1 * 40 / 140)
+        epoch_120 = int(nepoch_s1 * 120 / 140)
+        epoch_cooldown = nepoch_s1 - epoch_120
+
+        if epoch < epoch_40:
+            lr_factor = 0.6 + (epoch / epoch_40) * 0.4
+            wd_factor = 1.0
+            smooth_weight = 0.001 if not is_high_gaussian else 0.002
+        elif epoch < epoch_120:
+            lr_factor = 1.0
+            wd_factor = 1.0
+            smooth_weight = 0.005 if not is_high_gaussian else 0.008
+        else:
+            decay_progress = (epoch - epoch_120) / max(1, epoch_cooldown)
+            lr_factor = 0.1 ** decay_progress
+            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
+            smooth_weight = 0.01 if not is_high_gaussian else 0.016
+
+        for pg in optimizer.param_groups:
+            pg['lr'] = 0.1 * lr_factor
+            pg['weight_decay'] = 0.01 * wd_factor
+
+        # Frame order: deterministic or shuffled
+        if rng is not None:
+            frame_order = torch.randperm(nframe, generator=rng).tolist()
+        else:
+            frame_order = list(range(nframe))
+
+        loss_tmp = 0.0
+        for iframe in frame_order:
+            optimizer.zero_grad()
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
+            depth_loss = depth_alpha * torch.mean(tip)
+            loss = recon_loss + smooth_loss + depth_loss
+            loss.backward()
+            optimizer.step()
+
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+
+            loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # Hard-frame selection
+    frame_errors = []
+    with torch.no_grad():
+        for iframe in range(nframe):
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            frame_errors.append(error.item())
+
+    hard_count = max(1, (nframe + 1) // 2)
+    hard_indices = torch.topk(
+        torch.tensor(frame_errors), k=hard_count, largest=True
+    ).indices.tolist()
+
+    # STAGE 2
+    for epoch in range(nepoch_s2):
+        decay_progress = epoch / nepoch_s2
+        lr_factor = 0.1 ** decay_progress
+        smooth_weight = 0.01 + 0.01 * decay_progress
+        depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
+
+        for pg in optimizer.param_groups:
+            pg['lr'] = 0.1 * lr_factor
+            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
+
+        loss_tmp = 0.0
+        for _ in range(3):
+            for iframe in hard_indices:
+                optimizer.zero_grad()
+                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+                smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
+                depth_loss = depth_weight * torch.mean(tip)
+                loss = recon_loss + smooth_loss + depth_loss
+                loss.backward()
+                optimizer.step()
+
+                with torch.no_grad():
+                    tip.data = torch.clamp(tip, max=0.0)
+                    tip.data = translate_tip_mean(tip)
+
+                loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # Final reconstruction error (for selection between runs)
+    total_error = 0.0
+    with torch.no_grad():
+        for iframe in range(nframe):
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            total_error += torch.mean((recon - images[iframe]) ** 2).item()
+
+    return tip.detach(), loss_train, total_error
+
+
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Hybrid L-BFGS + AdamW BTR with noise-adaptive features.
+    """Stochastic multi-restart BTR with noise-adaptive features.
 
-    Architecture:
-    - Stage 0: AdamW warm-up (40 epochs) — initialize tip from flat
-    - Stage 1: L-BFGS full-batch optimization (30 steps) — exploit
-      curvature information for faster, more accurate convergence.
-      Each L-BFGS step uses ALL frames simultaneously.
-    - Stage 2: AdamW hard-frame refinement (60 epochs) — fine-tune
+    Runs BTR twice: once with deterministic frame order, once with
+    shuffled frame order. Selects the run with lower reconstruction error.
 
-    L-BFGS advantages over AdamW for BTR:
-    - Uses Hessian approximation → better step direction for deep tips
-    - Full-batch → clean gradient, no per-frame oscillation
-    - Faster convergence in smooth regions of the loss landscape
+    For conditions where the optimization landscape has multiple local
+    minima (e.g., sharp tips with Gaussian noise), the shuffled run
+    may find a better minimum.
+
+    The deterministic run ensures at least baseline performance.
     """
     device = images.device
     dtype = images.dtype
@@ -62,105 +178,23 @@ def reconstruct_tip(images, tip_size, **kwargs):
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    loss_train = []
+    if is_high_gaussian:
+        nepoch_s1, nepoch_s2 = 200, 100
+    else:
+        nepoch_s1, nepoch_s2 = 140, 60
 
-    # ── Stage 0: AdamW warm-up (escape flat initialization) ──
-    optimizer_adam = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-    for epoch in range(40):
-        lr_factor = 0.6 + (epoch / 40) * 0.4
-        for pg in optimizer_adam.param_groups:
-            pg['lr'] = 0.1 * lr_factor
+    # Run 1: deterministic (baseline behavior)
+    tip1, loss1, error1 = _single_run_btr(
+        images, tip_size, depth_alpha, is_high_gaussian,
+        nepoch_s1, nepoch_s2, shuffle_seed=None)
 
-        loss_tmp = 0.0
-        for iframe in range(nframe):
-            optimizer_adam.zero_grad()
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            loss = torch.mean((recon - images[iframe]) ** 2)
-            loss = loss + laplacian_smoothing(tip, 0.003) + depth_alpha * torch.mean(tip)
-            loss.backward()
-            optimizer_adam.step()
-            with torch.no_grad():
-                tip.data = torch.clamp(tip, max=0.0)
-                tip.data = translate_tip_mean(tip)
-            loss_tmp += loss.item()
-        loss_train.append(loss_tmp)
+    # Run 2: shuffled frame order (explore different basin)
+    tip2, loss2, error2 = _single_run_btr(
+        images, tip_size, depth_alpha, is_high_gaussian,
+        nepoch_s1, nepoch_s2, shuffle_seed=42)
 
-    # ── Stage 1: L-BFGS full-batch optimization ──
-    n_lbfgs_steps = 40 if not is_high_gaussian else 60
-
-    optimizer_lbfgs = optim.LBFGS(
-        [tip], lr=0.1, max_iter=5, history_size=10,
-        line_search_fn='strong_wolfe',
-    )
-
-    for step in range(n_lbfgs_steps):
-        progress = step / n_lbfgs_steps
-        smooth_weight = 0.005 + 0.005 * progress
-
-        def closure():
-            optimizer_lbfgs.zero_grad()
-            total_loss = torch.tensor(0.0, device=device, dtype=dtype)
-            for iframe in range(nframe):
-                recon = idilation(ierosion(images[iframe], tip), tip)
-                total_loss = total_loss + torch.mean((recon - images[iframe]) ** 2)
-            total_loss = total_loss / nframe
-            total_loss = total_loss + laplacian_smoothing(tip, smooth_weight)
-            total_loss = total_loss + depth_alpha * torch.mean(tip)
-            total_loss.backward()
-            return total_loss
-
-        loss_val = optimizer_lbfgs.step(closure)
-        with torch.no_grad():
-            tip.data = torch.clamp(tip, max=0.0)
-            tip.data = translate_tip_mean(tip)
-
-        if loss_val is not None:
-            loss_train.append(loss_val.item())
-
-    # ── Stage 2: AdamW hard-frame refinement ──
-    frame_errors = []
-    with torch.no_grad():
-        for iframe in range(nframe):
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            error = torch.mean((recon - images[iframe]) ** 2)
-            frame_errors.append(error.item())
-
-    hard_count = max(1, (nframe + 1) // 2)
-    hard_indices = torch.topk(
-        torch.tensor(frame_errors), k=hard_count, largest=True
-    ).indices.tolist()
-
-    optimizer_adam2 = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-    nepoch_s2 = 60 if not is_high_gaussian else 100
-
-    for epoch in range(nepoch_s2):
-        decay = epoch / nepoch_s2
-        lr_factor = 0.1 ** decay
-        smooth_weight = 0.01 + 0.01 * decay
-        depth_weight = depth_alpha * (1.0 - 0.5 * decay)
-
-        for pg in optimizer_adam2.param_groups:
-            pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay)
-
-        loss_tmp = 0.0
-        for _ in range(3):
-            for iframe in hard_indices:
-                optimizer_adam2.zero_grad()
-                recon = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean((recon - images[iframe]) ** 2)
-                smooth_loss = laplacian_smoothing(tip, smooth_weight)
-                depth_loss = depth_weight * torch.mean(tip)
-                loss = recon_loss + smooth_loss + depth_loss
-                loss.backward()
-                optimizer_adam2.step()
-
-                with torch.no_grad():
-                    tip.data = torch.clamp(tip, max=0.0)
-                    tip.data = translate_tip_mean(tip)
-
-                loss_tmp += loss.item()
-        loss_train.append(loss_tmp)
-
-    return tip.detach(), loss_train
+    # Select the better run
+    if error2 < error1:
+        return tip2, loss2
+    else:
+        return tip1, loss1
