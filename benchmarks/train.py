@@ -147,7 +147,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # Temperature schedule: anneal from warm to cold
     # Warm (T=1.0): smooth, noise-robust, good gradient flow
     # Cold (T=0.01): approaches exact morphological operations
-    T_start = 0.3
+    T_start = 0.1
     T_end = 0.01
 
     # STAGE 1: Soft morphology with temperature annealing
