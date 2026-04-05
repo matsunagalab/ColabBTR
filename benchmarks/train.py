@@ -16,6 +16,7 @@ def laplacian_smoothing(tip, weight=0.01):
 
 
 def estimate_high_freq_energy(images):
+    """Measure high-frequency energy in images as a noise proxy."""
     energies = []
     for i in range(images.shape[0]):
         img = images[i]
@@ -26,6 +27,11 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
+    """Bright/dark variance ratio to distinguish noise types.
+
+    Gaussian: ratio ~1.5-6.5 (constant variance).
+    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
+    """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -34,81 +40,56 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
-def _single_frame_tip(image, tip_size, nepoch=30):
-    """Estimate tip from a single frame (short optimization)."""
-    device, dtype = image.device, image.dtype
-    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    opt = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-    for epoch in range(nepoch):
-        opt.zero_grad()
-        recon = idilation(ierosion(image, tip), tip)
-        loss = torch.mean((recon - image) ** 2) + laplacian_smoothing(tip, 0.01)
-        loss.backward()
-        opt.step()
-        with torch.no_grad():
-            tip.data = torch.clamp(tip, max=0.0)
-            tip.data = translate_tip_mean(tip)
-    return tip.detach()
-
-
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Cross-frame consensus BTR.
+    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
 
-    Novel architecture:
-    Stage 0 (new): Estimate tip from EACH frame independently (30 epochs).
-      Take pixel-wise MEDIAN across all per-frame tips → consensus tip.
-      Median is robust to outlier frames (noisy or uninformative).
-      Uses this as INITIALIZATION instead of flat zeros.
+    Four regimes based on automatic noise detection:
 
-    Stage 1: Standard BTR with consensus initialization (100 epochs).
-    Stage 2: Hard-frame refinement (60 epochs).
+    1. Clean data (HF < 0.2):
+       Depth regularizer to break the flat-tip degeneracy.
 
-    The consensus initialization provides a better starting point than
-    flat zeros, especially for sharp tips where the optimizer needs to
-    travel far in parameter space.
+    2. Moderate noise (HF 0.2–0.5):
+       Standard baseline.
+
+    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
+       Clamp negative pixels to 0 (physical: image >= 0).
+       Extended compute: 200 + 100 epochs (vs 140 + 60).
+       Stronger smoothing.
+
+    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
+       Standard baseline (clamping + extended compute hurt Poisson).
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
+    # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
+    # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
+    # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    # ── Stage 0: Per-frame tip estimation + median consensus ──
-    per_frame_tips = []
-    for iframe in range(nframe):
-        tip_i = _single_frame_tip(images[iframe], tip_size, nepoch=30)
-        per_frame_tips.append(tip_i)
-
-    # Consensus: pixel-wise median (robust to outlier frames)
-    tip_stack = torch.stack(per_frame_tips)  # (nframe, H, W)
-    consensus_tip = tip_stack.median(dim=0).values
-
-    # Center the consensus tip
-    with torch.no_grad():
-        consensus_tip = torch.clamp(consensus_tip, max=0.0)
-        consensus_tip = translate_tip_mean(consensus_tip)
-
-    # Use consensus as initialization
-    tip = consensus_tip.clone().requires_grad_(True)
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # ── Stage 1: Full multi-frame BTR (from consensus init) ──
+    # Noise-adaptive epoch counts
     if is_high_gaussian:
-        nepoch_stage1 = 160
+        nepoch_stage1 = 200
         nepoch_stage2 = 100
     else:
-        nepoch_stage1 = 100
+        nepoch_stage1 = 140
         nepoch_stage2 = 60
 
+    # STAGE 1: Optimization on all frames
     for epoch in range(nepoch_stage1):
+        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
         epoch_40 = int(nepoch_stage1 * 40 / 140)
         epoch_120 = int(nepoch_stage1 * 120 / 140)
         epoch_cooldown = nepoch_stage1 - epoch_120
@@ -149,7 +130,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # ── Stage 2: Hard-frame refinement ──
+    # Evaluate frame errors for hard-frame selection
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -162,6 +143,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
+    # STAGE 2: Hard-frame refinement
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
