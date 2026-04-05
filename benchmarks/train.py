@@ -67,8 +67,8 @@ def reconstruct_tip(images, tip_size, **kwargs):
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    # SGLD only for clean/moderate data (noisy data has natural exploration)
-    use_sgld = hf_energy < 0.5
+    # SGLD only for clean data (noisy data has natural exploration via gradient noise)
+    use_sgld = hf_energy < 0.2
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     loss_train = []
