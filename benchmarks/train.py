@@ -1,6 +1,8 @@
 """BTR algorithm — the agent modifies this file to improve tip reconstruction."""
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from colabbtr.morphology import (
     idilation, ierosion, translate_tip_mean
@@ -27,11 +29,7 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
-    """Bright/dark variance ratio to distinguish noise types.
-
-    Gaussian: ratio ~1.5-6.5 (constant variance).
-    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
-    """
+    """Bright/dark variance ratio to distinguish noise types."""
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -40,24 +38,47 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
+class SurfaceNet(nn.Module):
+    """Small CNN that learns to estimate surfaces from AFM images.
+
+    Replaces the morphological erosion (which takes a hard min over a
+    local window and is noise-sensitive) with a learned inverse that
+    can implicitly denoise while inverting the dilation forward model.
+
+    The CNN is trained jointly with the tip for each input dataset.
+    """
+    def __init__(self, dtype=torch.float64):
+        super().__init__()
+        self.conv1 = nn.Conv2d(1, 16, 3, padding=1)
+        self.conv2 = nn.Conv2d(16, 16, 3, padding=1)
+        self.conv3 = nn.Conv2d(16, 1, 3, padding=1)
+        # Match input dtype
+        self.to(dtype)
+
+    def forward(self, image):
+        """Input: (H, W) image. Output: (H, W) estimated surface."""
+        x = image.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
+        x = F.relu(self.conv1(x))
+        x = F.relu(self.conv2(x))
+        x = self.conv3(x)
+        # Surface should be non-negative
+        x = F.relu(x)
+        return x.squeeze(0).squeeze(0)  # (H, W)
+
+
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
+    """Hybrid CNN-BTR: learned surface estimation + morphological dilation.
 
-    Four regimes based on automatic noise detection:
+    Architecture:
+    - Stage 0: Standard erosion-based BTR to get initial tip estimate
+    - Stage 1: CNN replaces erosion. The CNN learns surface estimation
+      that is robust to noise. Dilation (forward model) is unchanged.
+      CNN and tip are jointly optimized.
+    - Stage 2: Hard-frame refinement with standard erosion (fine-tuning)
 
-    1. Clean data (HF < 0.2):
-       Depth regularizer to break the flat-tip degeneracy.
-
-    2. Moderate noise (HF 0.2–0.5):
-       Standard baseline.
-
-    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
-       Clamp negative pixels to 0 (physical: image >= 0).
-       Extended compute: 200 + 100 epochs (vs 140 + 60).
-       Stronger smoothing.
-
-    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
-       Standard baseline (clamping + extended compute hurt Poisson).
+    The CNN acts as a learned denoising inverse operator.
+    Standard erosion: surface = min_over_window(image - tip) → noise-sensitive
+    CNN: surface = f_theta(image) → can learn noise-robust inverse
     """
     device = images.device
     dtype = images.dtype
@@ -68,57 +89,72 @@ def reconstruct_tip(images, tip_size, **kwargs):
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
-    # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
-    # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
+    # ── Stage 0: Standard BTR for initial tip (60 epochs) ──
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # Noise-adaptive epoch counts
-    if is_high_gaussian:
-        nepoch_stage1 = 200
-        nepoch_stage2 = 100
-    else:
-        nepoch_stage1 = 140
-        nepoch_stage2 = 60
-
-    # STAGE 1: Optimization on all frames
-    for epoch in range(nepoch_stage1):
-        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
-        epoch_40 = int(nepoch_stage1 * 40 / 140)
-        epoch_120 = int(nepoch_stage1 * 120 / 140)
-        epoch_cooldown = nepoch_stage1 - epoch_120
-
-        if epoch < epoch_40:
-            lr_factor = 0.6 + (epoch / epoch_40) * 0.4
-            wd_factor = 1.0
-            smooth_weight = 0.001 if not is_high_gaussian else 0.002
-        elif epoch < epoch_120:
-            lr_factor = 1.0
-            wd_factor = 1.0
-            smooth_weight = 0.005 if not is_high_gaussian else 0.008
-        else:
-            decay_progress = (epoch - epoch_120) / max(1, epoch_cooldown)
-            lr_factor = 0.1 ** decay_progress
-            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
-            smooth_weight = 0.01 if not is_high_gaussian else 0.016
-
+    for epoch in range(60):
+        lr_factor = 0.6 + (epoch / 60) * 0.4 if epoch < 20 else 1.0
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
-            smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
+            smooth_loss = laplacian_smoothing(tip, weight=0.005)
             depth_loss = depth_alpha * torch.mean(tip)
+            loss = recon_loss + smooth_loss + depth_loss
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+            loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # ── Stage 1: CNN-based surface estimation + tip optimization ──
+    surface_net = SurfaceNet(dtype=dtype).to(device)
+
+    # Joint optimizer: CNN weights + tip
+    optimizer = optim.AdamW(
+        [{'params': surface_net.parameters(), 'lr': 0.001},
+         {'params': [tip], 'lr': 0.05, 'weight_decay': 0.01}],
+    )
+
+    nepoch_cnn = 100 if not is_high_gaussian else 150
+    for epoch in range(nepoch_cnn):
+        decay = epoch / nepoch_cnn
+        lr_scale = 1.0 - 0.5 * decay  # gentle LR decay
+
+        for pg in optimizer.param_groups:
+            pg['lr'] = pg['lr'] * lr_scale / (lr_scale + 1e-8) if epoch > 0 else pg['lr']
+
+        # Reset LR each epoch (simpler than tracking)
+        optimizer.param_groups[0]['lr'] = 0.001 * (1.0 - 0.5 * decay)
+        optimizer.param_groups[1]['lr'] = 0.05 * (1.0 - 0.5 * decay)
+
+        loss_tmp = 0.0
+        for iframe in range(nframe):
+            optimizer.zero_grad()
+
+            # CNN predicts surface (replaces erosion)
+            surface_est = surface_net(images[iframe])
+
+            # Dilation with current tip (physical forward model)
+            image_recon = idilation(surface_est, tip)
+
+            recon_loss = torch.mean((image_recon - images[iframe]) ** 2)
+            smooth_loss = laplacian_smoothing(tip, weight=0.005)
+            depth_loss = depth_alpha * torch.mean(tip)
+
             loss = recon_loss + smooth_loss + depth_loss
             loss.backward()
             optimizer.step()
@@ -130,7 +166,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Evaluate frame errors for hard-frame selection
+    # ── Stage 2: Standard erosion refinement (fine-tune tip) ──
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -143,9 +181,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
-    for epoch in range(nepoch_stage2):
-        decay_progress = epoch / nepoch_stage2
+    nepoch_s2 = 60 if not is_high_gaussian else 80
+    for epoch in range(nepoch_s2):
+        decay_progress = epoch / nepoch_s2
         lr_factor = 0.1 ** decay_progress
         smooth_weight = 0.01 + 0.01 * decay_progress
         depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
