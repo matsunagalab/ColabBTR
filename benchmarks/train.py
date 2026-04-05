@@ -71,8 +71,11 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
-    # Physical preprocessing for high Gaussian noise
-    if is_high_gaussian:
+    # Physical preprocessing: clamp negative pixels for any additive noise
+    # True AFM image = dilation(surface, tip) >= 0 always.
+    # Gaussian noise pushes ~44% of pixels below zero — all noise artifacts.
+    is_additive = var_ratio < 100
+    if is_additive and hf_energy > 0.1:
         images = torch.clamp(images, min=0.0)
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
