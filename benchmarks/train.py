@@ -68,8 +68,15 @@ def reconstruct_tip(images, tip_size, **kwargs):
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
-    # Depth regularizer for clean data only
-    depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
+    # Depth regularizer for Gaussian noise (additive noise with var_ratio < 100)
+    # Counteracts the opening bluntness bias. Safe for Gaussian at all levels.
+    is_additive = var_ratio < 100
+    if hf_energy < 0.2:
+        depth_alpha = 0.005  # clean data: strong push
+    elif is_additive:
+        depth_alpha = 0.003  # Gaussian noise: moderate push
+    else:
+        depth_alpha = 0.0  # Poisson: disabled
 
     # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
