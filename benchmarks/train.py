@@ -87,13 +87,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
         nepoch_stage1 = 140
         nepoch_stage2 = 60
 
-    # Physics-motivated frame importance: frames with taller surfaces
-    # (higher image max) probe deeper into the tip → more informative.
-    # Weight reconstruction loss proportionally.
-    with torch.no_grad():
-        frame_heights = torch.tensor([images[i].max().item() for i in range(nframe)])
-        frame_weights = frame_heights / frame_heights.mean()  # normalize: mean weight = 1
-
     # STAGE 1: Optimization on all frames
     for epoch in range(nepoch_stage1):
         # Use EXACT original epoch-based breakpoints (scaled by nepoch)
@@ -123,7 +116,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
         for iframe in range(nframe):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            recon_loss = frame_weights[iframe] * torch.mean((image_reconstructed - images[iframe]) ** 2)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
             loss = recon_loss + smooth_loss + depth_loss
