@@ -1,22 +1,83 @@
 """BTR algorithm — the agent modifies this file to improve tip reconstruction."""
 
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
 from colabbtr.morphology import (
-    idilation, ierosion, translate_tip_mean
+    idilation, ierosion, translate_tip_mean, fixed_padding
 )
 
+
+# ──────────────────────────────────────────────────────────────────────
+# Soft morphological operations with entropic regularization
+# ──────────────────────────────────────────────────────────────────────
+
+def soft_dilation(image, tip, temperature):
+    """Soft dilation: replace hard max with tempered log-sum-exp.
+
+    Standard: dilation(x,y) = max_k [patch_k + tip_k]
+    Soft:     dilation_T    = T · log Σ_k exp((patch_k + tip_k) / T)
+
+    At T→0: exact morphological dilation
+    At T>0: smooth approximation, gradient flows to ALL kernel elements
+            proportionally (softmax weighting instead of argmax)
+    """
+    H, W = image.shape
+    kernel_size = tip.shape[0]
+    x = image.unsqueeze(0).unsqueeze(0)
+    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1),
+                       pad_value=float('-inf'))
+    x = F.unfold(x, kernel_size, dilation=1, padding=0, stride=1)
+    x = x.unsqueeze(1)
+
+    weight = tip.view(1, 1, -1, 1)
+    x = weight + x  # (1, 1, k*k, L)
+
+    # Soft max via log-sum-exp
+    x = temperature * torch.logsumexp(x / temperature, dim=2, keepdim=False)
+    x = x.view(-1, 1, H, W)
+    return x.squeeze(0).squeeze(0)
+
+
+def soft_erosion(surface, tip, temperature):
+    """Soft erosion: replace hard min with tempered smooth-min.
+
+    Standard: erosion(x,y) = min_k [patch_k - tip_k] = -max_k [tip_k - patch_k]
+    Soft:     erosion_T    = -T · log Σ_k exp((tip_k - patch_k) / T)
+
+    At T→0: exact morphological erosion
+    At T>0: smooth approximation, less sensitive to single noisy pixels
+    """
+    kernel_size = tip.shape[0]
+    H, W = surface.shape
+    x = surface.unsqueeze(0).unsqueeze(0)
+    x = fixed_padding(x, torch.tensor(kernel_size), dilation=torch.tensor(1),
+                       pad_value=float('inf'))
+    x = F.unfold(x, kernel_size, dilation=1, padding=0, stride=1)
+    x = x.unsqueeze(1)
+
+    weight = tip.view(1, 1, -1, 1)
+    x = weight - x  # (1, 1, k*k, L)
+
+    # Soft max via log-sum-exp, then negate for soft min
+    x = temperature * torch.logsumexp(x / temperature, dim=2, keepdim=False)
+    x = -x
+    x = x.view(-1, 1, H, W)
+    return x.squeeze(0).squeeze(0)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────
 
 def laplacian_smoothing(tip, weight=0.01):
     """Laplacian smoothing penalty: encourage smooth, physically plausible tips."""
     lap_x = (tip[2:, 1:-1] - 2 * tip[1:-1, 1:-1] + tip[0:-2, 1:-1]) ** 2
     lap_y = (tip[1:-1, 2:] - 2 * tip[1:-1, 1:-1] + tip[1:-1, 0:-2]) ** 2
-    roughness = torch.mean(lap_x) + torch.mean(lap_y)
-    return weight * roughness
+    return weight * (torch.mean(lap_x) + torch.mean(lap_y))
 
 
 def estimate_high_freq_energy(images):
-    """Measure high-frequency energy in images as a noise proxy."""
     energies = []
     for i in range(images.shape[0]):
         img = images[i]
@@ -27,11 +88,6 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
-    """Bright/dark variance ratio to distinguish noise types.
-
-    Gaussian: ratio ~1.5-6.5 (constant variance).
-    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
-    """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -40,38 +96,40 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
+# ──────────────────────────────────────────────────────────────────────
+# Main reconstruction
+# ──────────────────────────────────────────────────────────────────────
+
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
+    """BTR with entropic-regularized soft morphology + temperature annealing.
 
-    Four regimes based on automatic noise detection:
+    Key innovation: Replace hard min/max in erosion/dilation with
+    temperature-controlled log-sum-exp (soft morphology).
 
-    1. Clean data (HF < 0.2):
-       Depth regularizer to break the flat-tip degeneracy.
+    Benefits:
+    1. Gradient flows to ALL kernel elements (not just argmax/argmin)
+       → smoother optimization landscape, fewer local minima
+    2. At high temperature: robust to noise (soft operations average
+       over local noise fluctuations)
+    3. Temperature annealing: start warm (smooth, find correct basin)
+       → anneal to cold (sharp, recover exact morphology)
 
-    2. Moderate noise (HF 0.2–0.5):
-       Standard baseline.
+    This is entropic regularization applied to morphological operators,
+    analogous to Sinkhorn regularization in optimal transport.
 
-    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
-       Clamp negative pixels to 0 (physical: image >= 0).
-       Extended compute: 200 + 100 epochs (vs 140 + 60).
-       Stronger smoothing.
-
-    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
-       Standard baseline (clamping + extended compute hurt Poisson).
+    Stage 1: Soft morphology with temperature annealing (warm → cold)
+    Stage 2: Standard (hard) morphology for hard-frame refinement
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
-    # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
-    # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
-    # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
@@ -79,7 +137,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # Noise-adaptive epoch counts
     if is_high_gaussian:
         nepoch_stage1 = 200
         nepoch_stage2 = 100
@@ -87,12 +144,21 @@ def reconstruct_tip(images, tip_size, **kwargs):
         nepoch_stage1 = 140
         nepoch_stage2 = 60
 
-    # STAGE 1: Optimization on all frames
+    # Temperature schedule: anneal from warm to cold
+    # Warm (T=1.0): smooth, noise-robust, good gradient flow
+    # Cold (T=0.01): approaches exact morphological operations
+    T_start = 1.0
+    T_end = 0.01
+
+    # STAGE 1: Soft morphology with temperature annealing
     for epoch in range(nepoch_stage1):
-        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
         epoch_40 = int(nepoch_stage1 * 40 / 140)
         epoch_120 = int(nepoch_stage1 * 120 / 140)
         epoch_cooldown = nepoch_stage1 - epoch_120
+
+        # Temperature: exponential decay from T_start to T_end
+        progress = epoch / nepoch_stage1
+        temperature = T_start * (T_end / T_start) ** progress
 
         if epoch < epoch_40:
             lr_factor = 0.6 + (epoch / epoch_40) * 0.4
@@ -115,7 +181,11 @@ def reconstruct_tip(images, tip_size, **kwargs):
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+
+            # Use soft morphology with current temperature
+            surface_est = soft_erosion(images[iframe], tip, temperature)
+            image_reconstructed = soft_dilation(surface_est, tip, temperature)
+
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
@@ -130,7 +200,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Evaluate frame errors for hard-frame selection
+    # STAGE 2: Hard morphology for fine-tuning (exact operations)
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -143,7 +213,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
