@@ -67,6 +67,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
+    # SGLD only for clean/moderate data (noisy data has natural exploration)
+    use_sgld = hf_energy < 0.5
+
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     loss_train = []
 
@@ -119,9 +122,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
         loss_train.append(loss_tmp)
 
     # ── Stage 2: SGLD sampling (only for clean/moderate data) ──
-    # For noisy data, gradient noise already provides exploration;
-    # adding Langevin noise on top destabilizes the optimization.
-    use_sgld = hf_energy < 0.5
     nepoch_sgld = (60 if not is_high_gaussian else 80) if use_sgld else 0
     n_collect = 40  # collect last 40 samples for averaging
     collected_tips = []
