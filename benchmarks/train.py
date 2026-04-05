@@ -15,8 +15,27 @@ def laplacian_smoothing(tip, weight=0.01):
     return weight * roughness
 
 
+def surface_positivity_penalty(surface, weight=0.1):
+    """Penalize negative values in the estimated surface.
+
+    Physical constraint: molecular surfaces are always >= 0
+    (they represent heights above the AFM stage).
+
+    For the correct tip: erosion(image, tip) ≈ true_surface >= 0
+    For a too-flat tip: erosion(noisy_image, flat_tip) may produce
+      negative values (noise passes through) → penalized
+    For a too-deep tip: erosion over-subtracts → very negative → penalized
+
+    This regularization pushes the tip to produce physically plausible
+    surfaces, counteracting the bluntness bias WITHOUT requiring
+    ground truth. The gradient flows through erosion to the tip,
+    specifically adjusting tip pixels that cause surface violations.
+    """
+    negative_part = torch.clamp(-surface, min=0.0)
+    return weight * torch.mean(negative_part ** 2)
+
+
 def estimate_high_freq_energy(images):
-    """Measure high-frequency energy in images as a noise proxy."""
     energies = []
     for i in range(images.shape[0]):
         img = images[i]
@@ -27,11 +46,6 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
-    """Bright/dark variance ratio to distinguish noise types.
-
-    Gaussian: ratio ~1.5-6.5 (constant variance).
-    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
-    """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -41,37 +55,32 @@ def estimate_variance_ratio(images):
 
 
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
+    """BTR with surface quality regularization.
 
-    Four regimes based on automatic noise detection:
+    Novel regularization: instead of directly constraining the tip,
+    penalize physically implausible SURFACE ESTIMATES from erosion.
 
-    1. Clean data (HF < 0.2):
-       Depth regularizer to break the flat-tip degeneracy.
+    Molecular surfaces are always non-negative (height >= 0).
+    If the tip is wrong, erosion(image, tip) produces artifacts:
+    - Too-flat tip + noise → negative surface values
+    - Too-deep tip → very negative surface values
+    The surface positivity penalty pushes the tip toward producing
+    physically correct surfaces, breaking the bluntness bias.
 
-    2. Moderate noise (HF 0.2–0.5):
-       Standard baseline.
-
-    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
-       Clamp negative pixels to 0 (physical: image >= 0).
-       Extended compute: 200 + 100 epochs (vs 140 + 60).
-       Stronger smoothing.
-
-    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
-       Standard baseline (clamping + extended compute hurt Poisson).
+    This is "dual regularization" — constraining the tip through
+    the quality of its output, not through the tip values directly.
+    No ground truth required.
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
-    # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
-    # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
-    # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
@@ -79,7 +88,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # Noise-adaptive epoch counts
     if is_high_gaussian:
         nepoch_stage1 = 200
         nepoch_stage2 = 100
@@ -87,9 +95,8 @@ def reconstruct_tip(images, tip_size, **kwargs):
         nepoch_stage1 = 140
         nepoch_stage2 = 60
 
-    # STAGE 1: Optimization on all frames
+    # STAGE 1
     for epoch in range(nepoch_stage1):
-        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
         epoch_40 = int(nepoch_stage1 * 40 / 140)
         epoch_120 = int(nepoch_stage1 * 120 / 140)
         epoch_cooldown = nepoch_stage1 - epoch_120
@@ -115,11 +122,19 @@ def reconstruct_tip(images, tip_size, **kwargs):
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+
+            # Compute surface and reconstruction
+            surface_est = ierosion(images[iframe], tip)
+            image_reconstructed = idilation(surface_est, tip)
+
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
-            loss = recon_loss + smooth_loss + depth_loss
+
+            # Surface quality: penalize negative surface values
+            surf_pos_loss = surface_positivity_penalty(surface_est, weight=0.1)
+
+            loss = recon_loss + smooth_loss + depth_loss + surf_pos_loss
             loss.backward()
             optimizer.step()
 
@@ -130,7 +145,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Evaluate frame errors for hard-frame selection
+    # Hard-frame selection
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -143,7 +158,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
+    # STAGE 2: Hard-frame refinement (with surface quality)
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
@@ -158,11 +173,13 @@ def reconstruct_tip(images, tip_size, **kwargs):
         for _ in range(3):
             for iframe in hard_indices:
                 optimizer.zero_grad()
-                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+                surface_est = ierosion(images[iframe], tip)
+                image_reconstructed = idilation(surface_est, tip)
                 recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
-                loss = recon_loss + smooth_loss + depth_loss
+                surf_pos_loss = surface_positivity_penalty(surface_est, weight=0.05)
+                loss = recon_loss + smooth_loss + depth_loss + surf_pos_loss
                 loss.backward()
                 optimizer.step()
 
