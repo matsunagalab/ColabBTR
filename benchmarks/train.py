@@ -16,6 +16,7 @@ def laplacian_smoothing(tip, weight=0.01):
 
 
 def estimate_high_freq_energy(images):
+    """Measure high-frequency energy in images as a noise proxy."""
     energies = []
     for i in range(images.shape[0]):
         img = images[i]
@@ -26,6 +27,11 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
+    """Bright/dark variance ratio to distinguish noise types.
+
+    Gaussian: ratio ~1.5-6.5 (constant variance).
+    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
+    """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -34,29 +40,59 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
-def _single_run_btr(images, tip_size, depth_alpha, is_high_gaussian,
-                    nepoch_s1, nepoch_s2, shuffle_seed=None):
-    """Single BTR run with optional frame shuffling."""
+def reconstruct_tip(images, tip_size, **kwargs):
+    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
+
+    Four regimes based on automatic noise detection:
+
+    1. Clean data (HF < 0.2):
+       Depth regularizer to break the flat-tip degeneracy.
+
+    2. Moderate noise (HF 0.2–0.5):
+       Standard baseline.
+
+    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
+       Clamp negative pixels to 0 (physical: image >= 0).
+       Extended compute: 200 + 100 epochs (vs 140 + 60).
+       Stronger smoothing.
+
+    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
+       Standard baseline (clamping + extended compute hurt Poisson).
+    """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
+
+    # Noise detection
+    hf_energy = estimate_high_freq_energy(images)
+    var_ratio = estimate_variance_ratio(images)
+    is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
+
+    # Depth regularizer for clean data only
+    depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
+
+    # Physical preprocessing for high Gaussian noise
+    if is_high_gaussian:
+        images = torch.clamp(images, min=0.0)
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # Optional: create a frame order generator for shuffling
-    if shuffle_seed is not None:
-        rng = torch.Generator()
-        rng.manual_seed(shuffle_seed)
+    # Noise-adaptive epoch counts
+    if is_high_gaussian:
+        nepoch_stage1 = 200
+        nepoch_stage2 = 100
     else:
-        rng = None
+        nepoch_stage1 = 140
+        nepoch_stage2 = 60
 
-    # STAGE 1
-    for epoch in range(nepoch_s1):
-        epoch_40 = int(nepoch_s1 * 40 / 140)
-        epoch_120 = int(nepoch_s1 * 120 / 140)
-        epoch_cooldown = nepoch_s1 - epoch_120
+    # STAGE 1: Optimization on all frames
+    for epoch in range(nepoch_stage1):
+        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
+        epoch_40 = int(nepoch_stage1 * 40 / 140)
+        epoch_120 = int(nepoch_stage1 * 120 / 140)
+        epoch_cooldown = nepoch_stage1 - epoch_120
 
         if epoch < epoch_40:
             lr_factor = 0.6 + (epoch / epoch_40) * 0.4
@@ -76,14 +112,8 @@ def _single_run_btr(images, tip_size, depth_alpha, is_high_gaussian,
             pg['lr'] = 0.1 * lr_factor
             pg['weight_decay'] = 0.01 * wd_factor
 
-        # Frame order: deterministic or shuffled
-        if rng is not None:
-            frame_order = torch.randperm(nframe, generator=rng).tolist()
-        else:
-            frame_order = list(range(nframe))
-
         loss_tmp = 0.0
-        for iframe in frame_order:
+        for iframe in range(nframe):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
@@ -100,7 +130,7 @@ def _single_run_btr(images, tip_size, depth_alpha, is_high_gaussian,
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Hard-frame selection
+    # Evaluate frame errors for hard-frame selection
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -113,9 +143,9 @@ def _single_run_btr(images, tip_size, depth_alpha, is_high_gaussian,
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2
-    for epoch in range(nepoch_s2):
-        decay_progress = epoch / nepoch_s2
+    # STAGE 2: Hard-frame refinement
+    for epoch in range(nepoch_stage2):
+        decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
         smooth_weight = 0.01 + 0.01 * decay_progress
         depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
@@ -143,58 +173,4 @@ def _single_run_btr(images, tip_size, depth_alpha, is_high_gaussian,
                 loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Final reconstruction error (for selection between runs)
-    total_error = 0.0
-    with torch.no_grad():
-        for iframe in range(nframe):
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            total_error += torch.mean((recon - images[iframe]) ** 2).item()
-
-    return tip.detach(), loss_train, total_error
-
-
-def reconstruct_tip(images, tip_size, **kwargs):
-    """Stochastic multi-restart BTR with noise-adaptive features.
-
-    Runs BTR twice: once with deterministic frame order, once with
-    shuffled frame order. Selects the run with lower reconstruction error.
-
-    For conditions where the optimization landscape has multiple local
-    minima (e.g., sharp tips with Gaussian noise), the shuffled run
-    may find a better minimum.
-
-    The deterministic run ensures at least baseline performance.
-    """
-    device = images.device
-    dtype = images.dtype
-    nframe = images.shape[0]
-
-    hf_energy = estimate_high_freq_energy(images)
-    var_ratio = estimate_variance_ratio(images)
-    is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
-
-    depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
-
-    if is_high_gaussian:
-        images = torch.clamp(images, min=0.0)
-
-    if is_high_gaussian:
-        nepoch_s1, nepoch_s2 = 200, 100
-    else:
-        nepoch_s1, nepoch_s2 = 140, 60
-
-    # Run 1: deterministic (baseline behavior)
-    tip1, loss1, error1 = _single_run_btr(
-        images, tip_size, depth_alpha, is_high_gaussian,
-        nepoch_s1, nepoch_s2, shuffle_seed=None)
-
-    # Run 2: shuffled frame order (explore different basin)
-    tip2, loss2, error2 = _single_run_btr(
-        images, tip_size, depth_alpha, is_high_gaussian,
-        nepoch_s1, nepoch_s2, shuffle_seed=42)
-
-    # Select the better run
-    if error2 < error1:
-        return tip2, loss2
-    else:
-        return tip1, loss1
+    return tip.detach(), loss_train
