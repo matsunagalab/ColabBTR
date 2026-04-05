@@ -108,13 +108,23 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
     # ── Stage 2: SGLD sampling ──
     nepoch_sgld = 60 if not is_high_gaussian else 80
-    n_collect = 30  # collect last 30 samples for averaging
+    n_collect = 40  # collect last 40 samples for averaging
     collected_tips = []
 
-    # Temperature schedule: start warm, anneal to cold
-    T_start = 0.01
-    T_end = 0.001
+    # Noise-adaptive temperature:
+    # Clean data needs MORE exploration (flat landscape, local minima)
+    # Noisy data needs LESS (gradient noise already provides exploration)
+    if hf_energy < 0.2:
+        T_start, T_end = 0.01, 0.001    # clean: explore aggressively
+    elif hf_energy < 0.5:
+        T_start, T_end = 0.003, 0.0005  # moderate: mild exploration
+    else:
+        T_start, T_end = 0.001, 0.0001  # noisy: minimal (gradient noise suffices)
     sgld_lr = 0.01
+
+    # Fixed generator for reproducibility
+    sgld_rng = torch.Generator(device=device)
+    sgld_rng.manual_seed(12345)
 
     for epoch in range(nepoch_sgld):
         progress = epoch / nepoch_sgld
@@ -123,7 +133,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         loss_tmp = 0.0
         for iframe in range(nframe):
-            # Compute gradient
             if tip.grad is not None:
                 tip.grad.zero_()
             recon = idilation(ierosion(images[iframe], tip), tip)
@@ -134,7 +143,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
             # SGLD update: gradient descent + Langevin noise
             with torch.no_grad():
-                noise = torch.randn_like(tip) * math.sqrt(2 * current_lr * temperature)
+                noise_scale = math.sqrt(2 * current_lr * temperature)
+                noise = torch.randn(tip.shape, generator=sgld_rng,
+                                    device=device, dtype=dtype) * noise_scale
                 tip.data -= current_lr * tip.grad + noise
 
                 tip.data = torch.clamp(tip, max=0.0)
@@ -150,8 +161,8 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # ── Stage 3: Bayesian model averaging ──
     with torch.no_grad():
         tip_stack = torch.stack(collected_tips)
-        # Use MEDIAN for robustness (vs mean which can be pulled by outliers)
-        tip_averaged = tip_stack.median(dim=0).values
+        # Mean averaging: with fixed seed and many samples, mean is smooth
+        tip_averaged = tip_stack.mean(dim=0)
         tip_averaged = torch.clamp(tip_averaged, max=0.0)
         tip_averaged = translate_tip_mean(tip_averaged)
 
