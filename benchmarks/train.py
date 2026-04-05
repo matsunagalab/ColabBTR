@@ -34,25 +34,16 @@ def estimate_variance_ratio(images):
 
 
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Bayesian BTR via Stochastic Gradient Langevin Dynamics (SGLD).
+    """Noise-adaptive BTR with optional SGLD posterior refinement.
 
-    Treats the tip as a random variable with:
-    - Prior: Laplacian smoothness + non-positivity constraint
-    - Likelihood: Gaussian noise model on reconstruction error
+    Stage 1: FULL baseline BTR (140/200 epochs) — identical to 60ec965
+    Stage 1.5 (clean data only): SGLD posterior sampling (20 epochs)
+      + Bayesian model averaging of last 15 tip samples
+    Stage 2: Hard-frame refinement (60/100 epochs)
 
-    Architecture:
-    Stage 1: AdamW warmup (80 epochs) — find a good basin
-    Stage 2: SGLD sampling (80 epochs) — explore posterior around the mode
-      θ_{t+1} = θ_t - lr * ∇L(θ) + √(2·lr·T) · ε,  ε ~ N(0,I)
-      Temperature anneals from T_start to T_end
-    Stage 3: Bayesian model averaging — average the last N tip samples
-      This is more robust than a point estimate: local minima are
-      averaged out, giving a smoother, more reliable tip estimate.
-    Stage 4: AdamW hard-frame refinement from the averaged tip.
-
-    The SGLD noise helps escape local minima during Stage 2, and the
-    Bayesian averaging in Stage 3 provides a tip estimate that reflects
-    the POSTERIOR MODE rather than a single optimization trajectory.
+    SGLD is applied AFTER full convergence, not during warmup.
+    This ensures at least baseline-quality tip before any noise injection.
+    Very low temperature (T=0.0005) for gentle posterior exploration.
     """
     device = images.device
     dtype = images.dtype
@@ -63,42 +54,40 @@ def reconstruct_tip(images, tip_size, **kwargs):
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
+    use_sgld = hf_energy < 0.2  # only for clean data
 
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    # SGLD only for clean data (noisy data has natural exploration via gradient noise)
-    use_sgld = hf_energy < 0.2
-
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # ── Stage 1: AdamW optimization ──
-    # If SGLD will follow: shorter warmup (SGLD continues exploration)
-    # If no SGLD: full baseline-equivalent optimization
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-    if use_sgld:
-        nepoch_warmup = 80 if not is_high_gaussian else 120
+    if is_high_gaussian:
+        nepoch_stage1 = 200
+        nepoch_stage2 = 100
     else:
-        nepoch_warmup = 140 if not is_high_gaussian else 200
+        nepoch_stage1 = 140
+        nepoch_stage2 = 60
 
-    for epoch in range(nepoch_warmup):
-        # Use epoch-ratio breakpoints scaled to nepoch_warmup
-        e40 = int(nepoch_warmup * 40 / 140)
-        e120 = int(nepoch_warmup * 120 / 140)
-        ecd = nepoch_warmup - e120
-        if epoch < e40:
-            lr_factor = 0.6 + (epoch / e40) * 0.4
+    # ── Stage 1: FULL baseline BTR (exactly matching 60ec965) ──
+    for epoch in range(nepoch_stage1):
+        epoch_40 = int(nepoch_stage1 * 40 / 140)
+        epoch_120 = int(nepoch_stage1 * 120 / 140)
+        epoch_cooldown = nepoch_stage1 - epoch_120
+
+        if epoch < epoch_40:
+            lr_factor = 0.6 + (epoch / epoch_40) * 0.4
             wd_factor = 1.0
             smooth_weight = 0.001 if not is_high_gaussian else 0.002
-        elif epoch < e120:
+        elif epoch < epoch_120:
             lr_factor = 1.0
             wd_factor = 1.0
             smooth_weight = 0.005 if not is_high_gaussian else 0.008
         else:
-            d = (epoch - e120) / max(1, ecd)
-            lr_factor = 0.1 ** d
-            wd_factor = max(0.05, 1.0 - d * 0.95)
+            decay_progress = (epoch - epoch_120) / max(1, epoch_cooldown)
+            lr_factor = 0.1 ** decay_progress
+            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
             smooth_weight = 0.01 if not is_high_gaussian else 0.016
 
         for pg in optimizer.param_groups:
@@ -108,86 +97,72 @@ def reconstruct_tip(images, tip_size, **kwargs):
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            loss = torch.mean((recon - images[iframe]) ** 2)
-            loss = loss + laplacian_smoothing(tip, smooth_weight)
-            loss = loss + depth_alpha * torch.mean(tip)
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
+            depth_loss = depth_alpha * torch.mean(tip)
+            loss = recon_loss + smooth_loss + depth_loss
             loss.backward()
             optimizer.step()
 
             with torch.no_grad():
                 tip.data = torch.clamp(tip, max=0.0)
                 tip.data = translate_tip_mean(tip)
-            loss_tmp += loss.item()
-        loss_train.append(loss_tmp)
-
-    # ── Stage 2: SGLD sampling (only for clean/moderate data) ──
-    nepoch_sgld = (60 if not is_high_gaussian else 80) if use_sgld else 0
-    n_collect = 40  # collect last 40 samples for averaging
-    collected_tips = []
-
-    # Noise-adaptive temperature:
-    # Clean data needs MORE exploration (flat landscape, local minima)
-    # Noisy data needs LESS (gradient noise already provides exploration)
-    if hf_energy < 0.2:
-        T_start, T_end = 0.001, 0.0001   # clean: gentle exploration
-    elif hf_energy < 0.5:
-        T_start, T_end = 0.003, 0.0005  # moderate: mild exploration
-    else:
-        T_start, T_end = 0.001, 0.0001  # noisy: minimal (gradient noise suffices)
-    sgld_lr = 0.01
-
-    # Fixed generator for reproducibility
-    sgld_rng = torch.Generator(device=device)
-    sgld_rng.manual_seed(12345)
-
-    for epoch in range(nepoch_sgld):
-        progress = epoch / nepoch_sgld
-        temperature = T_start * (T_end / T_start) ** progress
-        current_lr = sgld_lr * (1.0 - 0.5 * progress)
-
-        loss_tmp = 0.0
-        for iframe in range(nframe):
-            if tip.grad is not None:
-                tip.grad.zero_()
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            loss = torch.mean((recon - images[iframe]) ** 2)
-            loss = loss + laplacian_smoothing(tip, 0.005)
-            loss = loss + depth_alpha * torch.mean(tip)
-            loss.backward()
-
-            # SGLD update: gradient descent + Langevin noise
-            with torch.no_grad():
-                noise_scale = math.sqrt(2 * current_lr * temperature)
-                noise = torch.randn(tip.shape, generator=sgld_rng,
-                                    device=device, dtype=dtype) * noise_scale
-                tip.data -= current_lr * tip.grad + noise
-
-                tip.data = torch.clamp(tip, max=0.0)
-                tip.data = translate_tip_mean(tip)
 
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-        # Collect samples for averaging (last n_collect epochs)
-        if epoch >= nepoch_sgld - n_collect:
-            collected_tips.append(tip.data.clone())
+    # ── Stage 1.5: SGLD posterior refinement (clean data only) ──
+    if use_sgld:
+        nepoch_sgld = 20
+        n_collect = 15
+        collected_tips = []
+        sgld_lr = 0.005
+        temperature = 0.0005  # very low: gentle exploration around converged tip
 
-    # ── Stage 3: Bayesian model averaging (if SGLD was used) ──
-    if collected_tips:
+        sgld_rng = torch.Generator(device=device)
+        sgld_rng.manual_seed(12345)
+
+        for epoch in range(nepoch_sgld):
+            loss_tmp = 0.0
+            for iframe in range(nframe):
+                if tip.grad is not None:
+                    tip.grad.zero_()
+                recon = idilation(ierosion(images[iframe], tip), tip)
+                loss = torch.mean((recon - images[iframe]) ** 2)
+                loss = loss + laplacian_smoothing(tip, 0.008)
+                loss = loss + depth_alpha * torch.mean(tip)
+                loss.backward()
+
+                with torch.no_grad():
+                    noise = torch.randn(tip.shape, generator=sgld_rng,
+                                        device=device, dtype=dtype)
+                    noise *= math.sqrt(2 * sgld_lr * temperature)
+                    tip.data -= sgld_lr * tip.grad + noise
+                    tip.data = torch.clamp(tip, max=0.0)
+                    tip.data = translate_tip_mean(tip)
+
+                loss_tmp += loss.item()
+            loss_train.append(loss_tmp)
+
+            if epoch >= nepoch_sgld - n_collect:
+                collected_tips.append(tip.data.clone())
+
+        # Bayesian model averaging
         with torch.no_grad():
             tip_stack = torch.stack(collected_tips)
             tip_averaged = tip_stack.mean(dim=0)
             tip_averaged = torch.clamp(tip_averaged, max=0.0)
             tip_averaged = translate_tip_mean(tip_averaged)
         tip = tip_averaged.clone().requires_grad_(True)
+        optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
 
-    # ── Stage 4: Hard-frame refinement ──
+    # ── Stage 2: Hard-frame refinement ──
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            error = torch.mean((recon - images[iframe]) ** 2)
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
             frame_errors.append(error.item())
 
     hard_count = max(1, (nframe + 1) // 2)
@@ -195,35 +170,27 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # After SGLD+averaging: tip is a new tensor, need fresh optimizer
-    # Without SGLD: reuse original optimizer (preserves momentum)
-    if collected_tips:
-        optimizer2 = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-    else:
-        optimizer2 = optimizer
-    nepoch_s2 = 60 if not is_high_gaussian else 100
+    for epoch in range(nepoch_stage2):
+        decay_progress = epoch / nepoch_stage2
+        lr_factor = 0.1 ** decay_progress
+        smooth_weight = 0.01 + 0.01 * decay_progress
+        depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
 
-    for epoch in range(nepoch_s2):
-        decay = epoch / nepoch_s2
-        lr_factor = 0.1 ** decay
-        smooth_weight = 0.01 + 0.01 * decay
-        depth_weight = depth_alpha * (1.0 - 0.5 * decay)
-
-        for pg in optimizer2.param_groups:
+        for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay)
+            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
 
         loss_tmp = 0.0
         for _ in range(3):
             for iframe in hard_indices:
-                optimizer2.zero_grad()
-                recon = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean((recon - images[iframe]) ** 2)
-                smooth_loss = laplacian_smoothing(tip, smooth_weight)
+                optimizer.zero_grad()
+                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
+                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+                smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
                 loss.backward()
-                optimizer2.step()
+                optimizer.step()
 
                 with torch.no_grad():
                     tip.data = torch.clamp(tip, max=0.0)
