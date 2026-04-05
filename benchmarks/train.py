@@ -1,6 +1,5 @@
 """BTR algorithm — the agent modifies this file to improve tip reconstruction."""
 
-import math
 import torch
 import torch.optim as optim
 from colabbtr.morphology import (
@@ -9,12 +8,15 @@ from colabbtr.morphology import (
 
 
 def laplacian_smoothing(tip, weight=0.01):
+    """Laplacian smoothing penalty: encourage smooth, physically plausible tips."""
     lap_x = (tip[2:, 1:-1] - 2 * tip[1:-1, 1:-1] + tip[0:-2, 1:-1]) ** 2
     lap_y = (tip[1:-1, 2:] - 2 * tip[1:-1, 1:-1] + tip[1:-1, 0:-2]) ** 2
-    return weight * (torch.mean(lap_x) + torch.mean(lap_y))
+    roughness = torch.mean(lap_x) + torch.mean(lap_y)
+    return weight * roughness
 
 
 def estimate_high_freq_energy(images):
+    """Measure high-frequency energy in images as a noise proxy."""
     energies = []
     for i in range(images.shape[0]):
         img = images[i]
@@ -25,6 +27,11 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
+    """Bright/dark variance ratio to distinguish noise types.
+
+    Gaussian: ratio ~1.5-6.5 (constant variance).
+    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
+    """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -34,28 +41,37 @@ def estimate_variance_ratio(images):
 
 
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with optional SGLD posterior refinement.
+    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
 
-    Stage 1: FULL baseline BTR (140/200 epochs) — identical to 60ec965
-    Stage 1.5 (clean data only): SGLD posterior sampling (20 epochs)
-      + Bayesian model averaging of last 15 tip samples
-    Stage 2: Hard-frame refinement (60/100 epochs)
+    Four regimes based on automatic noise detection:
 
-    SGLD is applied AFTER full convergence, not during warmup.
-    This ensures at least baseline-quality tip before any noise injection.
-    Very low temperature (T=0.0005) for gentle posterior exploration.
+    1. Clean data (HF < 0.2):
+       Depth regularizer to break the flat-tip degeneracy.
+
+    2. Moderate noise (HF 0.2–0.5):
+       Standard baseline.
+
+    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
+       Clamp negative pixels to 0 (physical: image >= 0).
+       Extended compute: 200 + 100 epochs (vs 140 + 60).
+       Stronger smoothing.
+
+    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
+       Standard baseline (clamping + extended compute hurt Poisson).
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
+    # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
+    # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
-    use_sgld = hf_energy < 0.2  # only for clean data
 
+    # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
@@ -63,6 +79,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
+    # Noise-adaptive epoch counts
     if is_high_gaussian:
         nepoch_stage1 = 200
         nepoch_stage2 = 100
@@ -70,8 +87,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
         nepoch_stage1 = 140
         nepoch_stage2 = 60
 
-    # ── Stage 1: FULL baseline BTR (exactly matching 60ec965) ──
+    # STAGE 1: Optimization on all frames
     for epoch in range(nepoch_stage1):
+        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
         epoch_40 = int(nepoch_stage1 * 40 / 140)
         epoch_120 = int(nepoch_stage1 * 120 / 140)
         epoch_cooldown = nepoch_stage1 - epoch_120
@@ -112,61 +130,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # ── Stage 1.5: Full-batch SGLD posterior refinement (clean data only) ──
-    # Key: accumulate ALL frame gradients, then ONE noise injection per epoch.
-    # Per-frame SGLD had 400 noise injections → too much drift.
-    # Full-batch has 20 → controlled.
-    if use_sgld:
-        nepoch_sgld = 20
-        n_collect = 15
-        collected_tips = []
-        sgld_lr = 0.005
-        temperature = 0.0005
-
-        sgld_rng = torch.Generator(device=device)
-        sgld_rng.manual_seed(12345)
-
-        for epoch in range(nepoch_sgld):
-            # Full-batch gradient accumulation
-            if tip.grad is not None:
-                tip.grad.zero_()
-            loss_tmp = 0.0
-            for iframe in range(nframe):
-                recon = idilation(ierosion(images[iframe], tip), tip)
-                frame_loss = torch.mean((recon - images[iframe]) ** 2) / nframe
-                frame_loss.backward()
-                loss_tmp += frame_loss.item()
-
-            # Add smoothing + depth gradient (once per epoch)
-            smooth_loss = laplacian_smoothing(tip, 0.008)
-            depth_loss = depth_alpha * torch.mean(tip)
-            (smooth_loss + depth_loss).backward()
-            loss_tmp += smooth_loss.item() + depth_loss.item()
-
-            # Single SGLD step: gradient descent + ONE noise injection
-            with torch.no_grad():
-                noise = torch.randn(tip.shape, generator=sgld_rng,
-                                    device=device, dtype=dtype)
-                noise *= math.sqrt(2 * sgld_lr * temperature)
-                tip.data -= sgld_lr * tip.grad + noise
-                tip.data = torch.clamp(tip, max=0.0)
-                tip.data = translate_tip_mean(tip)
-
-            loss_train.append(loss_tmp)
-
-            if epoch >= nepoch_sgld - n_collect:
-                collected_tips.append(tip.data.clone())
-
-        # Bayesian model averaging
-        with torch.no_grad():
-            tip_stack = torch.stack(collected_tips)
-            tip_averaged = tip_stack.mean(dim=0)
-            tip_averaged = torch.clamp(tip_averaged, max=0.0)
-            tip_averaged = translate_tip_mean(tip_averaged)
-        tip = tip_averaged.clone().requires_grad_(True)
-        optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-
-    # ── Stage 2: Hard-frame refinement ──
+    # Evaluate frame errors for hard-frame selection
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -179,6 +143,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
+    # STAGE 2: Hard-frame refinement
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
