@@ -76,10 +76,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
         images = torch.clamp(images, min=0.0)
 
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    # weight_decay=0: Laplacian smoothing handles shape regularization.
-    # This eliminates the need for lambda selection entirely —
-    # wd pushes depth toward zero (bluntness bias), Laplacian does not.
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.0)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
     # Noise-adaptive epoch counts
@@ -99,17 +96,21 @@ def reconstruct_tip(images, tip_size, **kwargs):
 
         if epoch < epoch_40:
             lr_factor = 0.6 + (epoch / epoch_40) * 0.4
-            smooth_weight = 0.003 if not is_high_gaussian else 0.005
+            wd_factor = 1.0
+            smooth_weight = 0.001 if not is_high_gaussian else 0.002
         elif epoch < epoch_120:
             lr_factor = 1.0
-            smooth_weight = 0.008 if not is_high_gaussian else 0.012
+            wd_factor = 1.0
+            smooth_weight = 0.005 if not is_high_gaussian else 0.008
         else:
             decay_progress = (epoch - epoch_120) / max(1, epoch_cooldown)
             lr_factor = 0.1 ** decay_progress
-            smooth_weight = 0.015 if not is_high_gaussian else 0.020
+            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
+            smooth_weight = 0.01 if not is_high_gaussian else 0.016
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
+            pg['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
@@ -146,11 +147,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
-        smooth_weight = 0.015 + 0.010 * decay_progress
+        smooth_weight = 0.01 + 0.01 * decay_progress
         depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
+            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
 
         loss_tmp = 0.0
         for _ in range(3):
