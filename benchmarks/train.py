@@ -90,7 +90,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
     n_lbfgs_steps = 40 if not is_high_gaussian else 60
 
     optimizer_lbfgs = optim.LBFGS(
-        [tip], lr=0.5, max_iter=10, history_size=10,
+        [tip], lr=0.1, max_iter=5, history_size=10,
         line_search_fn='strong_wolfe',
     )
 
