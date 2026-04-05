@@ -15,26 +15,6 @@ def laplacian_smoothing(tip, weight=0.01):
     return weight * roughness
 
 
-def surface_positivity_penalty(surface, weight=0.1):
-    """Penalize negative values in the estimated surface.
-
-    Physical constraint: molecular surfaces are always >= 0
-    (they represent heights above the AFM stage).
-
-    For the correct tip: erosion(image, tip) ≈ true_surface >= 0
-    For a too-flat tip: erosion(noisy_image, flat_tip) may produce
-      negative values (noise passes through) → penalized
-    For a too-deep tip: erosion over-subtracts → very negative → penalized
-
-    This regularization pushes the tip to produce physically plausible
-    surfaces, counteracting the bluntness bias WITHOUT requiring
-    ground truth. The gradient flows through erosion to the tip,
-    specifically adjusting tip pixels that cause surface violations.
-    """
-    negative_part = torch.clamp(-surface, min=0.0)
-    return weight * torch.mean(negative_part ** 2)
-
-
 def estimate_high_freq_energy(images):
     energies = []
     for i in range(images.shape[0]):
@@ -54,22 +34,38 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
+def _single_frame_tip(image, tip_size, nepoch=30):
+    """Estimate tip from a single frame (short optimization)."""
+    device, dtype = image.device, image.dtype
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    opt = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    for epoch in range(nepoch):
+        opt.zero_grad()
+        recon = idilation(ierosion(image, tip), tip)
+        loss = torch.mean((recon - image) ** 2) + laplacian_smoothing(tip, 0.01)
+        loss.backward()
+        opt.step()
+        with torch.no_grad():
+            tip.data = torch.clamp(tip, max=0.0)
+            tip.data = translate_tip_mean(tip)
+    return tip.detach()
+
+
 def reconstruct_tip(images, tip_size, **kwargs):
-    """BTR with surface quality regularization.
+    """Cross-frame consensus BTR.
 
-    Novel regularization: instead of directly constraining the tip,
-    penalize physically implausible SURFACE ESTIMATES from erosion.
+    Novel architecture:
+    Stage 0 (new): Estimate tip from EACH frame independently (30 epochs).
+      Take pixel-wise MEDIAN across all per-frame tips → consensus tip.
+      Median is robust to outlier frames (noisy or uninformative).
+      Uses this as INITIALIZATION instead of flat zeros.
 
-    Molecular surfaces are always non-negative (height >= 0).
-    If the tip is wrong, erosion(image, tip) produces artifacts:
-    - Too-flat tip + noise → negative surface values
-    - Too-deep tip → very negative surface values
-    The surface positivity penalty pushes the tip toward producing
-    physically correct surfaces, breaking the bluntness bias.
+    Stage 1: Standard BTR with consensus initialization (100 epochs).
+    Stage 2: Hard-frame refinement (60 epochs).
 
-    This is "dual regularization" — constraining the tip through
-    the quality of its output, not through the tip values directly.
-    No ground truth required.
+    The consensus initialization provides a better starting point than
+    flat zeros, especially for sharp tips where the optimizer needs to
+    travel far in parameter space.
     """
     device = images.device
     dtype = images.dtype
@@ -84,18 +80,34 @@ def reconstruct_tip(images, tip_size, **kwargs):
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    # ── Stage 0: Per-frame tip estimation + median consensus ──
+    per_frame_tips = []
+    for iframe in range(nframe):
+        tip_i = _single_frame_tip(images[iframe], tip_size, nepoch=30)
+        per_frame_tips.append(tip_i)
+
+    # Consensus: pixel-wise median (robust to outlier frames)
+    tip_stack = torch.stack(per_frame_tips)  # (nframe, H, W)
+    consensus_tip = tip_stack.median(dim=0).values
+
+    # Center the consensus tip
+    with torch.no_grad():
+        consensus_tip = torch.clamp(consensus_tip, max=0.0)
+        consensus_tip = translate_tip_mean(consensus_tip)
+
+    # Use consensus as initialization
+    tip = consensus_tip.clone().requires_grad_(True)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
+    # ── Stage 1: Full multi-frame BTR (from consensus init) ──
     if is_high_gaussian:
-        nepoch_stage1 = 200
+        nepoch_stage1 = 160
         nepoch_stage2 = 100
     else:
-        nepoch_stage1 = 140
+        nepoch_stage1 = 100
         nepoch_stage2 = 60
 
-    # STAGE 1
     for epoch in range(nepoch_stage1):
         epoch_40 = int(nepoch_stage1 * 40 / 140)
         epoch_120 = int(nepoch_stage1 * 120 / 140)
@@ -122,23 +134,11 @@ def reconstruct_tip(images, tip_size, **kwargs):
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-
-            # Compute surface and reconstruction
-            surface_est = ierosion(images[iframe], tip)
-            image_reconstructed = idilation(surface_est, tip)
-
+            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
-
-            # Surface quality: only during warmup (first epoch_40 epochs)
-            # Provides initial push against bluntness bias, then gets out of the way
-            if epoch < epoch_40:
-                surf_pos_loss = surface_positivity_penalty(surface_est, weight=0.1)
-            else:
-                surf_pos_loss = torch.tensor(0.0, device=device)
-
-            loss = recon_loss + smooth_loss + depth_loss + surf_pos_loss
+            loss = recon_loss + smooth_loss + depth_loss
             loss.backward()
             optimizer.step()
 
@@ -149,7 +149,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Hard-frame selection
+    # ── Stage 2: Hard-frame refinement ──
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -162,7 +162,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement (with surface quality)
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
@@ -177,13 +176,11 @@ def reconstruct_tip(images, tip_size, **kwargs):
         for _ in range(3):
             for iframe in hard_indices:
                 optimizer.zero_grad()
-                surface_est = ierosion(images[iframe], tip)
-                image_reconstructed = idilation(surface_est, tip)
+                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
                 recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
-                surf_pos_loss = surface_positivity_penalty(surface_est, weight=0.05)
-                loss = recon_loss + smooth_loss + depth_loss + surf_pos_loss
+                loss = recon_loss + smooth_loss + depth_loss
                 loss.backward()
                 optimizer.step()
 
