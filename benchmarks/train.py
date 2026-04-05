@@ -130,7 +130,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # Clean data needs MORE exploration (flat landscape, local minima)
     # Noisy data needs LESS (gradient noise already provides exploration)
     if hf_energy < 0.2:
-        T_start, T_end = 0.01, 0.001    # clean: explore aggressively
+        T_start, T_end = 0.001, 0.0001   # clean: gentle exploration
     elif hf_energy < 0.5:
         T_start, T_end = 0.003, 0.0005  # moderate: mild exploration
     else:
