@@ -132,7 +132,10 @@ def reconstruct_tip(images, tip_size, **kwargs):
             depth_loss = depth_alpha * torch.mean(tip)
 
             # Surface quality: penalize negative surface values
-            surf_pos_loss = surface_positivity_penalty(surface_est, weight=0.1)
+            # Anneal weight: strong early (break bluntness bias) → weak late (don't disrupt)
+            sp_progress = epoch / nepoch_stage1
+            sp_weight = 0.1 * max(0.1, 1.0 - sp_progress)
+            surf_pos_loss = surface_positivity_penalty(surface_est, weight=sp_weight)
 
             loss = recon_loss + smooth_loss + depth_loss + surf_pos_loss
             loss.backward()
