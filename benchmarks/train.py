@@ -196,7 +196,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
     ).indices.tolist()
 
     optimizer2 = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
-    nepoch_s2 = 60 if not is_high_gaussian else 80
+    nepoch_s2 = 60 if not is_high_gaussian else 100
 
     for epoch in range(nepoch_s2):
         decay = epoch / nepoch_s2
