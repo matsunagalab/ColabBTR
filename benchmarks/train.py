@@ -112,37 +112,46 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # ── Stage 1.5: SGLD posterior refinement (clean data only) ──
+    # ── Stage 1.5: Full-batch SGLD posterior refinement (clean data only) ──
+    # Key: accumulate ALL frame gradients, then ONE noise injection per epoch.
+    # Per-frame SGLD had 400 noise injections → too much drift.
+    # Full-batch has 20 → controlled.
     if use_sgld:
         nepoch_sgld = 20
         n_collect = 15
         collected_tips = []
         sgld_lr = 0.005
-        temperature = 0.0005  # very low: gentle exploration around converged tip
+        temperature = 0.0005
 
         sgld_rng = torch.Generator(device=device)
         sgld_rng.manual_seed(12345)
 
         for epoch in range(nepoch_sgld):
+            # Full-batch gradient accumulation
+            if tip.grad is not None:
+                tip.grad.zero_()
             loss_tmp = 0.0
             for iframe in range(nframe):
-                if tip.grad is not None:
-                    tip.grad.zero_()
                 recon = idilation(ierosion(images[iframe], tip), tip)
-                loss = torch.mean((recon - images[iframe]) ** 2)
-                loss = loss + laplacian_smoothing(tip, 0.008)
-                loss = loss + depth_alpha * torch.mean(tip)
-                loss.backward()
+                frame_loss = torch.mean((recon - images[iframe]) ** 2) / nframe
+                frame_loss.backward()
+                loss_tmp += frame_loss.item()
 
-                with torch.no_grad():
-                    noise = torch.randn(tip.shape, generator=sgld_rng,
-                                        device=device, dtype=dtype)
-                    noise *= math.sqrt(2 * sgld_lr * temperature)
-                    tip.data -= sgld_lr * tip.grad + noise
-                    tip.data = torch.clamp(tip, max=0.0)
-                    tip.data = translate_tip_mean(tip)
+            # Add smoothing + depth gradient (once per epoch)
+            smooth_loss = laplacian_smoothing(tip, 0.008)
+            depth_loss = depth_alpha * torch.mean(tip)
+            (smooth_loss + depth_loss).backward()
+            loss_tmp += smooth_loss.item() + depth_loss.item()
 
-                loss_tmp += loss.item()
+            # Single SGLD step: gradient descent + ONE noise injection
+            with torch.no_grad():
+                noise = torch.randn(tip.shape, generator=sgld_rng,
+                                    device=device, dtype=dtype)
+                noise *= math.sqrt(2 * sgld_lr * temperature)
+                tip.data -= sgld_lr * tip.grad + noise
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+
             loss_train.append(loss_tmp)
 
             if epoch >= nepoch_sgld - n_collect:
