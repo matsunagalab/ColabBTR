@@ -147,7 +147,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
     # Temperature schedule: anneal from warm to cold
     # Warm (T=1.0): smooth, noise-robust, good gradient flow
     # Cold (T=0.01): approaches exact morphological operations
-    T_start = 1.0
+    T_start = 0.3
     T_end = 0.01
 
     # STAGE 1: Soft morphology with temperature annealing
@@ -182,9 +182,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
         for iframe in range(nframe):
             optimizer.zero_grad()
 
-            # Use soft morphology with current temperature
+            # Soft erosion (noise-robust) + hard dilation (exact forward model)
             surface_est = soft_erosion(images[iframe], tip, temperature)
-            image_reconstructed = soft_dilation(surface_est, tip, temperature)
+            image_reconstructed = idilation(surface_est, tip)
 
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
