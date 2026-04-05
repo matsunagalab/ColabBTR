@@ -195,7 +195,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    optimizer2 = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    # After SGLD+averaging: tip is a new tensor, need fresh optimizer
+    # Without SGLD: reuse original optimizer (preserves momentum)
+    if collected_tips:
+        optimizer2 = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    else:
+        optimizer2 = optimizer
     nepoch_s2 = 60 if not is_high_gaussian else 100
 
     for epoch in range(nepoch_s2):
