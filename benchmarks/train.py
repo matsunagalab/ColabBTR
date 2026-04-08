@@ -8,15 +8,12 @@ from colabbtr.morphology import (
 
 
 def laplacian_smoothing(tip, weight=0.01):
-    """Laplacian smoothing penalty: encourage smooth, physically plausible tips."""
     lap_x = (tip[2:, 1:-1] - 2 * tip[1:-1, 1:-1] + tip[0:-2, 1:-1]) ** 2
     lap_y = (tip[1:-1, 2:] - 2 * tip[1:-1, 1:-1] + tip[1:-1, 0:-2]) ** 2
-    roughness = torch.mean(lap_x) + torch.mean(lap_y)
-    return weight * roughness
+    return weight * (torch.mean(lap_x) + torch.mean(lap_y))
 
 
 def estimate_high_freq_energy(images):
-    """Measure high-frequency energy in images as a noise proxy."""
     energies = []
     for i in range(images.shape[0]):
         img = images[i]
@@ -27,11 +24,6 @@ def estimate_high_freq_energy(images):
 
 
 def estimate_variance_ratio(images):
-    """Bright/dark variance ratio to distinguish noise types.
-
-    Gaussian: ratio ~1.5-6.5 (constant variance).
-    Poisson/none: ratio >> 100 (signal-dependent or zero variance).
-    """
     pixel_var = torch.var(images, dim=0)
     pixel_mean = torch.mean(images, dim=0)
     median_val = pixel_mean.median()
@@ -40,102 +32,124 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
+def freq_to_tip(freq_real, freq_imag, tip_size, K):
+    """Convert low-frequency FFT coefficients to spatial tip.
+
+    Only the K×K low-frequency block is optimized; all higher
+    frequencies are zero. Inverse FFT gives a smooth tip.
+    """
+    H, W = tip_size
+    # Build full Hermitian-symmetric frequency tensor
+    # Use rfft layout: only positive frequencies in last dim
+    Wr = W // 2 + 1
+    full_freq = torch.zeros(H, Wr, dtype=torch.complex128, device=freq_real.device)
+    full_freq[:K, :K] = torch.complex(freq_real, freq_imag)
+    # Inverse rfft → real spatial tip
+    tip = torch.fft.irfft2(full_freq, s=(H, W))
+    # Subtract max so apex = 0 (tip <= 0)
+    tip = tip - tip.max()
+    return tip
+
+
 def reconstruct_tip(images, tip_size, **kwargs):
-    """Noise-adaptive BTR with depth regularizer and Gaussian-specific preprocessing.
+    """BTR with frequency-domain tip parameterization.
 
-    Four regimes based on automatic noise detection:
+    Tip is parameterized by K×K low-frequency FFT coefficients (~32 params)
+    instead of full pixel grid (225 params). The spatial tip is generated
+    via inverse FFT, automatically smooth.
 
-    1. Clean data (HF < 0.2):
-       Depth regularizer to break the flat-tip degeneracy.
-
-    2. Moderate noise (HF 0.2–0.5):
-       Standard baseline.
-
-    3. High additive (Gaussian) noise (HF > 0.5, var_ratio < 100):
-       Clamp negative pixels to 0 (physical: image >= 0).
-       Extended compute: 200 + 100 epochs (vs 140 + 60).
-       Stronger smoothing.
-
-    4. High signal-dependent (Poisson) noise (HF > 0.5, var_ratio >= 100):
-       Standard baseline (clamping + extended compute hurt Poisson).
+    Stage 1: Frequency-domain optimization (low-dim, well-conditioned)
+    Stage 2: Spatial-domain refinement (full 225 params, fine details)
+    Stage 3: Hard-frame refinement
     """
     device = images.device
     dtype = images.dtype
     nframe = images.shape[0]
 
-    # Noise detection
     hf_energy = estimate_high_freq_energy(images)
     var_ratio = estimate_variance_ratio(images)
     is_high_gaussian = (hf_energy > 0.5) and (var_ratio < 100)
 
-    # Depth regularizer for clean data only
     depth_alpha = 0.005 if hf_energy < 0.2 else 0.0
 
-    # Physical preprocessing for high Gaussian noise
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
-    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+    H, W = tip_size
+    K = 5  # 5x5 low-frequency block = ~50 parameters
     loss_train = []
 
-    # Noise-adaptive epoch counts
-    if is_high_gaussian:
-        nepoch_stage1 = 200
-        nepoch_stage2 = 100
-    else:
-        nepoch_stage1 = 140
-        nepoch_stage2 = 60
+    # ── Stage 1: Frequency-domain optimization ──
+    freq_real = torch.zeros(K, K, dtype=torch.float64, requires_grad=True, device=device)
+    freq_imag = torch.zeros(K, K, dtype=torch.float64, requires_grad=True, device=device)
+    optimizer = optim.AdamW([freq_real, freq_imag], lr=0.1, weight_decay=0.001)
 
-    # STAGE 1: Optimization on all frames
-    for epoch in range(nepoch_stage1):
-        # Use EXACT original epoch-based breakpoints (scaled by nepoch)
-        epoch_40 = int(nepoch_stage1 * 40 / 140)
-        epoch_120 = int(nepoch_stage1 * 120 / 140)
-        epoch_cooldown = nepoch_stage1 - epoch_120
+    nepoch_freq = 80 if not is_high_gaussian else 120
 
-        if epoch < epoch_40:
-            lr_factor = 0.6 + (epoch / epoch_40) * 0.4
-            wd_factor = 1.0
-            smooth_weight = 0.001 if not is_high_gaussian else 0.002
-        elif epoch < epoch_120:
+    for epoch in range(nepoch_freq):
+        progress = epoch / nepoch_freq
+        if progress < 0.3:
+            lr_factor = 0.6 + (progress / 0.3) * 0.4
+        elif progress < 0.85:
             lr_factor = 1.0
-            wd_factor = 1.0
-            smooth_weight = 0.005 if not is_high_gaussian else 0.008
         else:
-            decay_progress = (epoch - epoch_120) / max(1, epoch_cooldown)
-            lr_factor = 0.1 ** decay_progress
-            wd_factor = max(0.05, 1.0 - decay_progress * 0.95)
-            smooth_weight = 0.01 if not is_high_gaussian else 0.016
+            d = (progress - 0.85) / 0.15
+            lr_factor = 0.1 ** d
 
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * wd_factor
 
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
-            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
-            smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
-            depth_loss = depth_alpha * torch.mean(tip)
-            loss = recon_loss + smooth_loss + depth_loss
+            tip = freq_to_tip(freq_real, freq_imag, tip_size, K)
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            loss = torch.mean((recon - images[iframe]) ** 2)
+            loss = loss + depth_alpha * torch.mean(tip)
             loss.backward()
             optimizer.step()
-
-            with torch.no_grad():
-                tip.data = torch.clamp(tip, max=0.0)
-                tip.data = translate_tip_mean(tip)
-
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Evaluate frame errors for hard-frame selection
+    # ── Stage 2: Convert to spatial tip and refine ──
+    with torch.no_grad():
+        tip_init = freq_to_tip(freq_real, freq_imag, tip_size, K)
+        tip_init = torch.clamp(tip_init, max=0.0)
+        tip_init = translate_tip_mean(tip_init)
+
+    tip = tip_init.clone().requires_grad_(True)
+    optimizer = optim.AdamW([tip], lr=0.05, weight_decay=0.01)
+
+    nepoch_spatial = 80 if not is_high_gaussian else 120
+    for epoch in range(nepoch_spatial):
+        progress = epoch / nepoch_spatial
+        lr_factor = (1.0 - 0.7 * progress)
+        smooth_weight = 0.005 if not is_high_gaussian else 0.01
+
+        for pg in optimizer.param_groups:
+            pg['lr'] = 0.05 * lr_factor
+
+        loss_tmp = 0.0
+        for iframe in range(nframe):
+            optimizer.zero_grad()
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            loss = torch.mean((recon - images[iframe]) ** 2)
+            loss = loss + laplacian_smoothing(tip, smooth_weight)
+            loss = loss + depth_alpha * torch.mean(tip)
+            loss.backward()
+            optimizer.step()
+            with torch.no_grad():
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+            loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # ── Stage 3: Hard-frame refinement ──
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
-            image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            error = torch.mean((image_reconstructed - images[iframe]) ** 2)
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            error = torch.mean((recon - images[iframe]) ** 2)
             frame_errors.append(error.item())
 
     hard_count = max(1, (nframe + 1) // 2)
@@ -143,33 +157,30 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
-    for epoch in range(nepoch_stage2):
-        decay_progress = epoch / nepoch_stage2
-        lr_factor = 0.1 ** decay_progress
-        smooth_weight = 0.01 + 0.01 * decay_progress
-        depth_weight = depth_alpha * (1.0 - 0.5 * decay_progress)
+    nepoch_s3 = 60 if not is_high_gaussian else 100
+    for epoch in range(nepoch_s3):
+        decay = epoch / nepoch_s3
+        lr_factor = 0.1 ** decay
+        smooth_weight = 0.01 + 0.01 * decay
+        depth_weight = depth_alpha * (1.0 - 0.5 * decay)
 
         for pg in optimizer.param_groups:
-            pg['lr'] = 0.1 * lr_factor
-            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay_progress)
+            pg['lr'] = 0.05 * lr_factor
+            pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay)
 
         loss_tmp = 0.0
         for _ in range(3):
             for iframe in hard_indices:
                 optimizer.zero_grad()
-                image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
-                smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
-                depth_loss = depth_weight * torch.mean(tip)
-                loss = recon_loss + smooth_loss + depth_loss
+                recon = idilation(ierosion(images[iframe], tip), tip)
+                loss = torch.mean((recon - images[iframe]) ** 2)
+                loss = loss + laplacian_smoothing(tip, smooth_weight)
+                loss = loss + depth_weight * torch.mean(tip)
                 loss.backward()
                 optimizer.step()
-
                 with torch.no_grad():
                     tip.data = torch.clamp(tip, max=0.0)
                     tip.data = translate_tip_mean(tip)
-
                 loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
