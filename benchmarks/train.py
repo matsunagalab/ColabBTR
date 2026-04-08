@@ -18,14 +18,11 @@ def laplacian_smoothing(tip, weight=0.01):
 def make_freq_weights(H, W, cutoff, device, dtype):
     """Lorentzian low-pass weights for frequency-domain loss.
 
-    Down-weights high frequencies where noise dominates signal.
     weight(f) = 1 / (1 + (f/cutoff)^2)
-
-    For Gaussian noise (white): noise PSD is flat, signal PSD decays
-    with frequency. Low cutoff → emphasize structural error, suppress noise.
+    Down-weights high frequencies where noise dominates signal.
     """
     fy = torch.fft.fftfreq(H, device=device, dtype=dtype)
-    fx = torch.fft.rfftfreq(W, device=device, dtype=dtype)
+    fx = torch.fft.fftfreq(W, device=device, dtype=dtype)
     f = torch.sqrt(fy[:, None] ** 2 + fx[None, :] ** 2)
     return 1.0 / (1.0 + (f / cutoff) ** 2)
 
@@ -33,13 +30,15 @@ def make_freq_weights(H, W, cutoff, device, dtype):
 def freq_weighted_mse(residual, freq_weights):
     """MSE in frequency domain with per-band weights.
 
-    Parseval: ||r||² = ||r̂||² (FFT preserves energy).
-    Weighted: ||W·r̂||² emphasizes selected frequency bands.
+    Uses ortho-normalized FFT so Parseval gives:
+        sum(|fft|²) = sum(|residual|²)
+    With weights w(f), the loss equals:
+        sum(w² · |fft|²) = filtered energy in spatial domain
     """
-    residual_fft = torch.fft.rfft2(residual)
+    H, W = residual.shape
+    residual_fft = torch.fft.fft2(residual, norm='ortho')
     weighted = residual_fft * freq_weights
-    # Mean of squared magnitude
-    return torch.mean(torch.real(weighted * weighted.conj()))
+    return torch.sum(torch.real(weighted * weighted.conj())) / (H * W)
 
 
 def estimate_high_freq_energy(images):
