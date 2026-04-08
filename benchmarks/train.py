@@ -101,13 +101,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    # Frequency-weighted loss for noisy conditions
-    # Higher noise → lower cutoff → more emphasis on structural (low-freq) error
+    # Frequency-weighted loss only for very high noise (HF > 0.8 → Gaussian σ=1.0)
+    # Wiener-like Lorentzian filter to suppress noise-dominated bands.
     H, W = images.shape[1], images.shape[2]
-    use_freq_loss = hf_energy > 0.2  # only for noisy data (clean uses MSE)
+    use_freq_loss = hf_energy > 0.8 and is_high_gaussian
     if use_freq_loss:
-        # Cutoff inversely scales with noise: more noise → lower cutoff
-        cutoff = max(0.1, 0.3 / (1.0 + hf_energy))
+        cutoff = 0.35  # gentle filter — keeps most signal, suppresses very high freq
         freq_weights = make_freq_weights(H, W, cutoff, device, dtype)
     else:
         freq_weights = None
