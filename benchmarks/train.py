@@ -15,32 +15,6 @@ def laplacian_smoothing(tip, weight=0.01):
     return weight * roughness
 
 
-def make_freq_weights(H, W, cutoff, device, dtype):
-    """Lorentzian low-pass weights for frequency-domain loss.
-
-    weight(f) = 1 / (1 + (f/cutoff)^2)
-    Down-weights high frequencies where noise dominates signal.
-    """
-    fy = torch.fft.fftfreq(H, device=device, dtype=dtype)
-    fx = torch.fft.fftfreq(W, device=device, dtype=dtype)
-    f = torch.sqrt(fy[:, None] ** 2 + fx[None, :] ** 2)
-    return 1.0 / (1.0 + (f / cutoff) ** 2)
-
-
-def freq_weighted_mse(residual, freq_weights):
-    """MSE in frequency domain with per-band weights.
-
-    Uses ortho-normalized FFT so Parseval gives:
-        sum(|fft|²) = sum(|residual|²)
-    With weights w(f), the loss equals:
-        sum(w² · |fft|²) = filtered energy in spatial domain
-    """
-    H, W = residual.shape
-    residual_fft = torch.fft.fft2(residual, norm='ortho')
-    weighted = residual_fft * freq_weights
-    return torch.sum(torch.real(weighted * weighted.conj())) / (H * W)
-
-
 def estimate_high_freq_energy(images):
     """Measure high-frequency energy in images as a noise proxy."""
     energies = []
@@ -101,16 +75,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    # Frequency-weighted loss only for very high noise (HF > 0.8 → Gaussian σ=1.0)
-    # Wiener-like Lorentzian filter to suppress noise-dominated bands.
-    H, W = images.shape[1], images.shape[2]
-    use_freq_loss = hf_energy > 0.8 and is_high_gaussian
-    if use_freq_loss:
-        cutoff = 0.35  # gentle filter — keeps most signal, suppresses very high freq
-        freq_weights = make_freq_weights(H, W, cutoff, device, dtype)
-    else:
-        freq_weights = None
-
     tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
     optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
@@ -152,11 +116,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
         for iframe in range(nframe):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-            residual = image_reconstructed - images[iframe]
-            if freq_weights is not None:
-                recon_loss = freq_weighted_mse(residual, freq_weights)
-            else:
-                recon_loss = torch.mean(residual ** 2)
+            recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
             loss = recon_loss + smooth_loss + depth_loss
