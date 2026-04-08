@@ -15,21 +15,6 @@ def laplacian_smoothing(tip, weight=0.01):
     return weight * roughness
 
 
-def gradient_matching_loss(recon, target):
-    """Match spatial gradients of reconstruction and target.
-
-    Edges (gradients) carry structural information. Matching them
-    emphasizes structure over absolute pixel values, which is useful
-    for sharp tips that produce strong edges in AFM images.
-    """
-    # x and y gradients
-    rx = recon[:, 1:] - recon[:, :-1]
-    ry = recon[1:, :] - recon[:-1, :]
-    tx = target[:, 1:] - target[:, :-1]
-    ty = target[1:, :] - target[:-1, :]
-    return torch.mean((rx - tx) ** 2) + torch.mean((ry - ty) ** 2)
-
-
 def estimate_high_freq_energy(images):
     """Measure high-frequency energy in images as a noise proxy."""
     energies = []
@@ -132,11 +117,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
             optimizer.zero_grad()
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
             recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
-            # Add gradient (edge) matching for structural emphasis
-            grad_loss = 0.5 * gradient_matching_loss(image_reconstructed, images[iframe])
             smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
             depth_loss = depth_alpha * torch.mean(tip)
-            loss = recon_loss + grad_loss + smooth_loss + depth_loss
+            loss = recon_loss + smooth_loss + depth_loss
             loss.backward()
             optimizer.step()
 
