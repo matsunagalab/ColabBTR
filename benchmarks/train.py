@@ -13,6 +13,13 @@ def laplacian_smoothing(tip, weight=0.01):
     return weight * (torch.mean(lap_x) + torch.mean(lap_y))
 
 
+def laplacian_smoothing_2d(image, weight=0.001):
+    """Laplacian smoothing for a single 2D image (surface)."""
+    lap_x = (image[2:, 1:-1] - 2 * image[1:-1, 1:-1] + image[0:-2, 1:-1]) ** 2
+    lap_y = (image[1:-1, 2:] - 2 * image[1:-1, 1:-1] + image[1:-1, 0:-2]) ** 2
+    return weight * (torch.mean(lap_x) + torch.mean(lap_y))
+
+
 def estimate_high_freq_energy(images):
     energies = []
     for i in range(images.shape[0]):
@@ -32,35 +39,17 @@ def estimate_variance_ratio(images):
     return bright / (dark + 1e-8)
 
 
-def freq_to_tip(freq_real, freq_imag, tip_size, K):
-    """Convert low-frequency FFT coefficients to spatial tip.
-
-    Only the K×K low-frequency block is optimized; all higher
-    frequencies are zero. Inverse FFT gives a smooth tip.
-    """
-    H, W = tip_size
-    # Build full Hermitian-symmetric frequency tensor
-    # Use rfft layout: only positive frequencies in last dim
-    Wr = W // 2 + 1
-    full_freq = torch.zeros(H, Wr, dtype=torch.complex128, device=freq_real.device)
-    full_freq[:K, :K] = torch.complex(freq_real, freq_imag)
-    # Inverse rfft → real spatial tip
-    tip = torch.fft.irfft2(full_freq, s=(H, W))
-    # Subtract max so apex = 0 (tip <= 0)
-    tip = tip - tip.max()
-    return tip
-
-
 def reconstruct_tip(images, tip_size, **kwargs):
-    """BTR with frequency-domain tip parameterization.
+    """Joint surface-tip BTR with consistency anchoring.
 
-    Tip is parameterized by K×K low-frequency FFT coefficients (~32 params)
-    instead of full pixel grid (225 params). The spatial tip is generated
-    via inverse FFT, automatically smooth.
-
-    Stage 1: Frequency-domain optimization (low-dim, well-conditioned)
-    Stage 2: Spatial-domain refinement (full 225 params, fine details)
-    Stage 3: Hard-frame refinement
+    Stage 0: Standard BTR for initial tip (60 epochs)
+    Stage 1: Joint optimization of surfaces + tip
+      - Surfaces: per-frame free variables
+      - Anchored via consistency loss: S_i ≈ erosion(image_i, tip).detach()
+      - Tip updated via dilation loss: dilation(S_i, tip) ≈ image_i
+      - Surfaces have flexibility to deviate from exact erosion (denoise)
+      - Tip identifiability preserved through anchoring
+    Stage 2: Standard hard-frame refinement
     """
     device = images.device
     dtype = images.dtype
@@ -75,67 +64,23 @@ def reconstruct_tip(images, tip_size, **kwargs):
     if is_high_gaussian:
         images = torch.clamp(images, min=0.0)
 
-    H, W = tip_size
-    K = 5  # 5x5 low-frequency block = ~50 parameters
+    tip = torch.zeros(tip_size, dtype=dtype, requires_grad=True, device=device)
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
     loss_train = []
 
-    # ── Stage 1: Frequency-domain optimization ──
-    freq_real = torch.zeros(K, K, dtype=torch.float64, requires_grad=True, device=device)
-    freq_imag = torch.zeros(K, K, dtype=torch.float64, requires_grad=True, device=device)
-    optimizer = optim.AdamW([freq_real, freq_imag], lr=0.1, weight_decay=0.001)
-
-    nepoch_freq = 80 if not is_high_gaussian else 120
-
-    for epoch in range(nepoch_freq):
-        progress = epoch / nepoch_freq
-        if progress < 0.3:
-            lr_factor = 0.6 + (progress / 0.3) * 0.4
-        elif progress < 0.85:
-            lr_factor = 1.0
-        else:
-            d = (progress - 0.85) / 0.15
-            lr_factor = 0.1 ** d
-
+    # ── Stage 0: Standard BTR for initial tip (60 epochs) ──
+    for epoch in range(60):
+        lr_factor = 0.6 + (epoch / 60) * 0.4 if epoch < 20 else 1.0
         for pg in optimizer.param_groups:
             pg['lr'] = 0.1 * lr_factor
-
-        loss_tmp = 0.0
-        for iframe in range(nframe):
-            optimizer.zero_grad()
-            tip = freq_to_tip(freq_real, freq_imag, tip_size, K)
-            recon = idilation(ierosion(images[iframe], tip), tip)
-            loss = torch.mean((recon - images[iframe]) ** 2)
-            loss = loss + depth_alpha * torch.mean(tip)
-            loss.backward()
-            optimizer.step()
-            loss_tmp += loss.item()
-        loss_train.append(loss_tmp)
-
-    # ── Stage 2: Convert to spatial tip and refine ──
-    with torch.no_grad():
-        tip_init = freq_to_tip(freq_real, freq_imag, tip_size, K)
-        tip_init = torch.clamp(tip_init, max=0.0)
-        tip_init = translate_tip_mean(tip_init)
-
-    tip = tip_init.clone().requires_grad_(True)
-    optimizer = optim.AdamW([tip], lr=0.05, weight_decay=0.01)
-
-    nepoch_spatial = 80 if not is_high_gaussian else 120
-    for epoch in range(nepoch_spatial):
-        progress = epoch / nepoch_spatial
-        lr_factor = (1.0 - 0.7 * progress)
-        smooth_weight = 0.005 if not is_high_gaussian else 0.01
-
-        for pg in optimizer.param_groups:
-            pg['lr'] = 0.05 * lr_factor
+            pg['weight_decay'] = 0.01
 
         loss_tmp = 0.0
         for iframe in range(nframe):
             optimizer.zero_grad()
             recon = idilation(ierosion(images[iframe], tip), tip)
             loss = torch.mean((recon - images[iframe]) ** 2)
-            loss = loss + laplacian_smoothing(tip, smooth_weight)
-            loss = loss + depth_alpha * torch.mean(tip)
+            loss = loss + laplacian_smoothing(tip, 0.003) + depth_alpha * torch.mean(tip)
             loss.backward()
             optimizer.step()
             with torch.no_grad():
@@ -144,7 +89,73 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # ── Stage 3: Hard-frame refinement ──
+    # ── Stage 1: Joint surface-tip optimization with anchoring ──
+    # Initialize surfaces from erosion
+    surfaces = []
+    with torch.no_grad():
+        for iframe in range(nframe):
+            s = ierosion(images[iframe], tip)
+            surfaces.append(s.clone())
+    surfaces_param = torch.stack(surfaces).requires_grad_(True)
+
+    # Joint optimizer
+    optimizer_joint = optim.AdamW([
+        {'params': surfaces_param, 'lr': 0.05, 'weight_decay': 0.0},
+        {'params': [tip], 'lr': 0.05, 'weight_decay': 0.01},
+    ])
+
+    nepoch_joint = 80 if not is_high_gaussian else 120
+    consistency_alpha = 0.5  # weight for surface anchoring
+
+    for epoch in range(nepoch_joint):
+        progress = epoch / nepoch_joint
+        lr_decay = 1.0 - 0.7 * progress
+        for pg in optimizer_joint.param_groups:
+            pg['lr'] = 0.05 * lr_decay
+
+        # Re-anchor surfaces every 10 epochs
+        if epoch % 10 == 0:
+            with torch.no_grad():
+                for iframe in range(nframe):
+                    surfaces_param.data[iframe] = ierosion(images[iframe], tip)
+
+        loss_tmp = 0.0
+        for iframe in range(nframe):
+            optimizer_joint.zero_grad()
+
+            S = surfaces_param[iframe]
+            # Reconstruction: dilation(S, tip) ≈ image
+            recon = idilation(S, tip)
+            recon_loss = torch.mean((recon - images[iframe]) ** 2)
+
+            # Consistency anchor: S ≈ erosion(image, tip).detach()
+            with torch.no_grad():
+                S_anchor = ierosion(images[iframe], tip)
+            cons_loss = consistency_alpha * torch.mean((S - S_anchor) ** 2)
+
+            # Surface smoothness
+            surf_smooth = laplacian_smoothing_2d(S, 0.001)
+
+            # Tip regularization
+            tip_smooth = laplacian_smoothing(tip, 0.005)
+            depth_loss = depth_alpha * torch.mean(tip)
+
+            loss = recon_loss + cons_loss + surf_smooth + tip_smooth + depth_loss
+            loss.backward()
+            optimizer_joint.step()
+
+            with torch.no_grad():
+                # Surface non-negative
+                surfaces_param.data[iframe] = torch.clamp(surfaces_param.data[iframe], min=0.0)
+                tip.data = torch.clamp(tip, max=0.0)
+                tip.data = translate_tip_mean(tip)
+
+            loss_tmp += loss.item()
+        loss_train.append(loss_tmp)
+
+    # ── Stage 2: Standard hard-frame refinement ──
+    optimizer = optim.AdamW([tip], lr=0.1, weight_decay=0.01)
+
     frame_errors = []
     with torch.no_grad():
         for iframe in range(nframe):
@@ -157,15 +168,15 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    nepoch_s3 = 60 if not is_high_gaussian else 100
-    for epoch in range(nepoch_s3):
-        decay = epoch / nepoch_s3
+    nepoch_s2 = 60 if not is_high_gaussian else 100
+    for epoch in range(nepoch_s2):
+        decay = epoch / nepoch_s2
         lr_factor = 0.1 ** decay
         smooth_weight = 0.01 + 0.01 * decay
         depth_weight = depth_alpha * (1.0 - 0.5 * decay)
 
         for pg in optimizer.param_groups:
-            pg['lr'] = 0.05 * lr_factor
+            pg['lr'] = 0.1 * lr_factor
             pg['weight_decay'] = 0.01 * max(0.02, 1.0 - decay)
 
         loss_tmp = 0.0
