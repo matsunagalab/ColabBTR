@@ -144,20 +144,25 @@ def reconstruct_tip(images, tip_size, **kwargs):
     ).indices.tolist()
 
     # Compute cross-frame residual variance for pixel-wise importance
-    # Only for non-high-Gaussian: at σ=1.0, noise dominates variance
-    if not is_high_gaussian:
-        with torch.no_grad():
-            residuals = []
-            for iframe in range(nframe):
-                recon = idilation(ierosion(images[iframe], tip), tip)
-                residual = recon - images[iframe]
-                residuals.append(residual)
-            residual_stack = torch.stack(residuals)
-            pixel_importance = residual_stack.var(dim=0)
-            pixel_importance = pixel_importance / (pixel_importance.mean() + 1e-8)
-            pixel_importance = torch.clamp(pixel_importance, min=0.1, max=5.0)
-    else:
-        pixel_importance = None
+    # Smooth the variance to extract STRUCTURAL pattern (invariant to noise level):
+    # structural variance is smooth, noise variance is pixel-level random
+    import torch.nn.functional as F_imp
+    with torch.no_grad():
+        residuals = []
+        for iframe in range(nframe):
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            residual = recon - images[iframe]
+            residuals.append(residual)
+        residual_stack = torch.stack(residuals)
+        raw_variance = residual_stack.var(dim=0)  # (H, W)
+        # Smooth to remove noise contribution, keep spatial structure
+        var_4d = raw_variance.unsqueeze(0).unsqueeze(0)
+        structural_var = F_imp.avg_pool2d(
+            F_imp.pad(var_4d, (2, 2, 2, 2), mode='reflect'),
+            kernel_size=5, stride=1, padding=0
+        ).squeeze(0).squeeze(0)
+        pixel_importance = structural_var / (structural_var.mean() + 1e-8)
+        pixel_importance = torch.clamp(pixel_importance, min=0.2, max=3.0)
 
     # STAGE 2: Hard-frame refinement with pixel importance weighting
     for epoch in range(nepoch_stage2):
@@ -175,10 +180,7 @@ def reconstruct_tip(images, tip_size, **kwargs):
             for iframe in hard_indices:
                 optimizer.zero_grad()
                 image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                if pixel_importance is not None:
-                    recon_loss = torch.mean(pixel_importance * (image_reconstructed - images[iframe]) ** 2)
-                else:
-                    recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+                recon_loss = torch.mean(pixel_importance * (image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
