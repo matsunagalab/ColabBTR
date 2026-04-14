@@ -130,50 +130,20 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Evaluate frame errors + compute pixel-wise tip constraint map
+    # Evaluate frame errors for hard-frame selection
     frame_errors = []
-    tip_activity = torch.zeros(tip_size, device=device, dtype=dtype)
-
-    for iframe in range(nframe):
-        # Frame error for hard-frame selection
-        with torch.no_grad():
+    with torch.no_grad():
+        for iframe in range(nframe):
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
             error = torch.mean((image_reconstructed - images[iframe]) ** 2)
             frame_errors.append(error.item())
-
-        # Tip activity: which pixels participate in erosion for this frame
-        # grad(sum(erosion))/grad(tip) = -count(argmin selections per tip pixel)
-        tip_act = tip.detach().clone().requires_grad_(True)
-        surface = ierosion(images[iframe], tip_act)
-        surface.sum().backward()
-        tip_activity += tip_act.grad.abs()
-
-    # Normalize activity: high = well-constrained (apex), low = under-constrained (deep edges)
-    tip_activity = tip_activity / (tip_activity.max() + 1e-8)
-
-    # Inpaint under-constrained pixels from constrained neighbors
-    # After Stage 1, the apex (constrained) is reliable. Deep edges may be wrong.
-    # Blend tip with a smoothed version: unconstrained pixels get the smooth value.
-    with torch.no_grad():
-        import torch.nn.functional as F
-        tip_4d = tip.data.unsqueeze(0).unsqueeze(0)
-        # Smooth tip via avg pooling (5x5 kernel)
-        tip_smooth = F.avg_pool2d(
-            F.pad(tip_4d, (2, 2, 2, 2), mode='reflect'),
-            kernel_size=5, stride=1, padding=0
-        ).squeeze(0).squeeze(0)
-        # Blend: constrained pixels keep original, unconstrained get smooth value
-        blend = tip_activity  # 1 = keep original, 0 = use smooth
-        tip.data = blend * tip.data + (1 - blend) * tip_smooth
-        tip.data = torch.clamp(tip, max=0.0)
-        tip.data = translate_tip_mean(tip)
 
     hard_count = max(1, (nframe + 1) // 2)
     hard_indices = torch.topk(
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement with constraint mask
+    # STAGE 2: Hard-frame refinement
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
