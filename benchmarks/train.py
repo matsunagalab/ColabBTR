@@ -130,20 +130,36 @@ def reconstruct_tip(images, tip_size, **kwargs):
             loss_tmp += loss.item()
         loss_train.append(loss_tmp)
 
-    # Evaluate frame errors for hard-frame selection
+    # Evaluate frame errors + compute pixel-wise tip constraint map
     frame_errors = []
-    with torch.no_grad():
-        for iframe in range(nframe):
+    tip_activity = torch.zeros(tip_size, device=device, dtype=dtype)
+
+    for iframe in range(nframe):
+        # Frame error for hard-frame selection
+        with torch.no_grad():
             image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
             error = torch.mean((image_reconstructed - images[iframe]) ** 2)
             frame_errors.append(error.item())
+
+        # Tip activity: which pixels participate in erosion for this frame
+        # grad(sum(erosion))/grad(tip) = -count(argmin selections per tip pixel)
+        tip_act = tip.detach().clone().requires_grad_(True)
+        surface = ierosion(images[iframe], tip_act)
+        surface.sum().backward()
+        tip_activity += tip_act.grad.abs()
+
+    # Normalize activity: high = well-constrained, low = under-constrained
+    tip_activity = tip_activity / (tip_activity.max() + 1e-8)
+    # Soft mask: freeze under-constrained pixels in Stage 2
+    # sigmoid threshold at 0.1 with sharpness 20
+    constraint_mask = torch.sigmoid(20.0 * (tip_activity - 0.1))
 
     hard_count = max(1, (nframe + 1) // 2)
     hard_indices = torch.topk(
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
+    # STAGE 2: Hard-frame refinement with constraint mask
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
@@ -164,6 +180,12 @@ def reconstruct_tip(images, tip_size, **kwargs):
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
                 loss.backward()
+
+                # Mask gradient: suppress updates to under-constrained pixels
+                with torch.no_grad():
+                    if tip.grad is not None:
+                        tip.grad *= constraint_mask
+
                 optimizer.step()
 
                 with torch.no_grad():
