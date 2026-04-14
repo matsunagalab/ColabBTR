@@ -148,11 +148,25 @@ def reconstruct_tip(images, tip_size, **kwargs):
         surface.sum().backward()
         tip_activity += tip_act.grad.abs()
 
-    # Normalize activity: high = well-constrained, low = under-constrained
+    # Normalize activity: high = well-constrained (apex), low = under-constrained (deep edges)
     tip_activity = tip_activity / (tip_activity.max() + 1e-8)
-    # Soft mask: freeze under-constrained pixels in Stage 2
-    # sigmoid threshold at 0.1 with sharpness 20
-    constraint_mask = torch.sigmoid(20.0 * (tip_activity - 0.1))
+
+    # Inpaint under-constrained pixels from constrained neighbors
+    # After Stage 1, the apex (constrained) is reliable. Deep edges may be wrong.
+    # Blend tip with a smoothed version: unconstrained pixels get the smooth value.
+    with torch.no_grad():
+        import torch.nn.functional as F
+        tip_4d = tip.data.unsqueeze(0).unsqueeze(0)
+        # Smooth tip via avg pooling (5x5 kernel)
+        tip_smooth = F.avg_pool2d(
+            F.pad(tip_4d, (2, 2, 2, 2), mode='reflect'),
+            kernel_size=5, stride=1, padding=0
+        ).squeeze(0).squeeze(0)
+        # Blend: constrained pixels keep original, unconstrained get smooth value
+        blend = tip_activity  # 1 = keep original, 0 = use smooth
+        tip.data = blend * tip.data + (1 - blend) * tip_smooth
+        tip.data = torch.clamp(tip, max=0.0)
+        tip.data = translate_tip_mean(tip)
 
     hard_count = max(1, (nframe + 1) // 2)
     hard_indices = torch.topk(
@@ -180,12 +194,6 @@ def reconstruct_tip(images, tip_size, **kwargs):
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
                 loss.backward()
-
-                # Mask gradient: suppress updates to under-constrained pixels
-                with torch.no_grad():
-                    if tip.grad is not None:
-                        tip.grad *= constraint_mask
-
                 optimizer.step()
 
                 with torch.no_grad():
