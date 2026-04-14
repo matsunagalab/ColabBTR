@@ -143,7 +143,22 @@ def reconstruct_tip(images, tip_size, **kwargs):
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
+    # Compute cross-frame residual variance for pixel-wise importance
+    # Pixels where residual varies across frames → tip acts there → weight higher
+    with torch.no_grad():
+        residuals = []
+        for iframe in range(nframe):
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            residual = recon - images[iframe]  # ≤ 0 (anti-extensive)
+            residuals.append(residual)
+        residual_stack = torch.stack(residuals)  # (nframe, H, W)
+        pixel_importance = residual_stack.var(dim=0)  # (H, W)
+        # Normalize: mean weight = 1
+        pixel_importance = pixel_importance / (pixel_importance.mean() + 1e-8)
+        # Soft clamp: prevent extreme weights
+        pixel_importance = torch.clamp(pixel_importance, min=0.1, max=5.0)
+
+    # STAGE 2: Hard-frame refinement with pixel importance weighting
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
@@ -159,7 +174,8 @@ def reconstruct_tip(images, tip_size, **kwargs):
             for iframe in hard_indices:
                 optimizer.zero_grad()
                 image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+                # Pixel-weighted MSE: emphasize where tip acts
+                recon_loss = torch.mean(pixel_importance * (image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
