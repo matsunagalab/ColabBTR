@@ -157,12 +157,18 @@ def reconstruct_tip(images, tip_size, **kwargs):
         raw_variance = residual_stack.var(dim=0)  # (H, W)
         # Smooth to remove noise contribution, keep spatial structure
         var_4d = raw_variance.unsqueeze(0).unsqueeze(0)
+        # Debias: subtract noise floor (10th percentile of variance)
+        noise_floor = raw_variance.quantile(0.1)
+        debiased = torch.clamp(raw_variance - noise_floor, min=0.0)
+        # Smooth to get spatial structure
+        db_4d = debiased.unsqueeze(0).unsqueeze(0)
         structural_var = F_imp.avg_pool2d(
-            F_imp.pad(var_4d, (2, 2, 2, 2), mode='reflect'),
+            F_imp.pad(db_4d, (2, 2, 2, 2), mode='reflect'),
             kernel_size=5, stride=1, padding=0
         ).squeeze(0).squeeze(0)
+        # Normalize: mean weight = 1
         pixel_importance = structural_var / (structural_var.mean() + 1e-8)
-        pixel_importance = torch.clamp(pixel_importance, min=0.5, max=1.5)
+        pixel_importance = torch.clamp(pixel_importance, min=0.2, max=3.0)
 
     # STAGE 2: Hard-frame refinement with pixel importance weighting
     for epoch in range(nepoch_stage2):
