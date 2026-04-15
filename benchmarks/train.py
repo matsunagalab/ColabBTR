@@ -186,7 +186,9 @@ def reconstruct_tip(images, tip_size, **kwargs):
             for iframe in hard_indices:
                 optimizer.zero_grad()
                 image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean(pixel_importance * (image_reconstructed - images[iframe]) ** 2)
+                # Fade importance toward uniform: full importance at start, MSE at end
+                effective_imp = 1.0 + (pixel_importance - 1.0) * max(0, 1.0 - 2.0 * decay_progress)
+                recon_loss = torch.mean(effective_imp * (image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
