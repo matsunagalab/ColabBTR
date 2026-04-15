@@ -413,6 +413,17 @@ def _adaptive_btr(images, tip_size, weight_decay, depth_alpha, nepoch_s1, nepoch
     hc = max(1, (nframe + 1) // 2)
     hi = torch.topk(torch.tensor(errors), k=hc, largest=True).indices.tolist()
 
+    # Pixel importance from cross-frame mean residual
+    with torch.no_grad():
+        residuals = []
+        for iframe in range(nframe):
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            residuals.append(recon - images[iframe])
+        mean_res = torch.stack(residuals).mean(dim=0)
+        pix_imp = mean_res.abs()
+        pix_imp = pix_imp / (pix_imp.mean() + 1e-8)
+        pix_imp = torch.clamp(pix_imp, min=0.2, max=3.0)
+
     for epoch in range(nepoch_s2):
         d = epoch / nepoch_s2
         lr_f = 0.1 ** d; sw = 0.01 + 0.01 * d
@@ -424,7 +435,7 @@ def _adaptive_btr(images, tip_size, weight_decay, depth_alpha, nepoch_s1, nepoch
             for iframe in hi:
                 opt.zero_grad()
                 recon = idilation(ierosion(images[iframe], tip), tip)
-                loss = torch.mean((recon - images[iframe]) ** 2)
+                loss = torch.mean(pix_imp * (recon - images[iframe]) ** 2)
                 loss = loss + laplacian_smoothing(tip, sw) + dw * torch.mean(tip)
                 loss.backward(); opt.step()
                 with torch.no_grad():
@@ -726,7 +737,21 @@ def improved_btr(images, tip_size, nepoch=None, lr=0.1,
         torch.tensor(frame_errors), k=hard_count, largest=True
     ).indices.tolist()
 
-    # STAGE 2: Hard-frame refinement
+    # Cross-frame mean residual as pixel-wise importance for Stage 2
+    # Mean of 20 frames cancels zero-mean noise → pure structural residual.
+    # |mean_residual| is large where tip consistently removes features.
+    with torch.no_grad():
+        residuals = []
+        for iframe in range(nframe):
+            recon = idilation(ierosion(images[iframe], tip), tip)
+            residual = recon - images[iframe]
+            residuals.append(residual)
+        mean_residual = torch.stack(residuals).mean(dim=0)
+        pixel_importance = mean_residual.abs()
+        pixel_importance = pixel_importance / (pixel_importance.mean() + 1e-8)
+        pixel_importance = torch.clamp(pixel_importance, min=0.2, max=3.0)
+
+    # STAGE 2: Hard-frame refinement with pixel importance weighting
     for epoch in range(nepoch_stage2):
         decay_progress = epoch / nepoch_stage2
         lr_factor = 0.1 ** decay_progress
@@ -742,7 +767,7 @@ def improved_btr(images, tip_size, nepoch=None, lr=0.1,
             for iframe in hard_indices:
                 optimizer.zero_grad()
                 image_reconstructed = idilation(ierosion(images[iframe], tip), tip)
-                recon_loss = torch.mean((image_reconstructed - images[iframe]) ** 2)
+                recon_loss = torch.mean(pixel_importance * (image_reconstructed - images[iframe]) ** 2)
                 smooth_loss = laplacian_smoothing(tip, weight=smooth_weight)
                 depth_loss = depth_weight * torch.mean(tip)
                 loss = recon_loss + smooth_loss + depth_loss
