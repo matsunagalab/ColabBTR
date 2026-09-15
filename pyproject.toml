@@ -31,12 +31,6 @@ benchmark = [
     "matplotlib",
     "scipy",
 ]
-
-[tool.pytest.ini_options]
-markers = [
-    "benchmark: slow statistical benchmarks (deselect with '-m not benchmark')",
-]
-
 notebook = [
     "numpy",
     "matplotlib",
@@ -45,4 +39,9 @@ notebook = [
     "scikit-learn",
     "jupyter",
     "ipywidgets",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "benchmark: slow statistical benchmarks (deselect with '-m not benchmark')",
 ]
