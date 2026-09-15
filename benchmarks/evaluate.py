@@ -3,9 +3,16 @@
 import argparse
 import json
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+# "python benchmarks/evaluate.py" puts benchmarks/ on sys.path, not the repo root,
+# so neither "benchmarks.train" nor this checkout's colabbtr would be importable.
+# Redundant under "uv run" (the editable install already puts the repo root on
+# the path) but needed when the script is run with a bare interpreter.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 
@@ -70,6 +77,9 @@ def run_single(data_path, device=None):
         "noise_sigma": cfg["noise_sigma"],
         "seed": cfg["seed"],
         "nframe": cfg["nframe"],
+        # which renderer produced the data; results across different values are
+        # not comparable (absent for data predating supersampled rendering)
+        "supersample": cfg.get("supersample"),
         "rmsd": round(rmsd, 4),
         "rmsd_cutoff": round(cutoff, 4),
         "final_loss": round(loss[-1], 6),

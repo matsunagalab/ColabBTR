@@ -21,10 +21,24 @@ across all benchmark conditions (3 PDBs [3A5I, 1GGG, 1SMP] x 2 tips x 4 noise le
 ## Evaluation
 
 ```bash
-python benchmarks/evaluate.py --quick   # fast smoke test (~15 sec)
-python benchmarks/evaluate.py           # full sweep (~15 min)
+python benchmarks/evaluate.py --quick   # fast smoke test (~35 sec)
+python benchmarks/evaluate.py           # full sweep (~45-60 min)
 python benchmarks/report.py             # summary table
 ```
+
+## Renderer change (2026-08-13)
+
+`prepare.py` now renders images with `afmize_supersampled` instead of point-sampling
+the surface and dilating on the coarse grid. The old images were an *exact* coarse
+dilation of `tip_gt`, so BTR was inverting precisely the forward model that produced
+them and the benchmark could not see any model mismatch; the new images cannot be
+reproduced exactly by any coarse surface, which is both harder and more realistic.
+
+**RMSD values recorded before this change are not comparable with values recorded
+after it.** Regenerate the data (`python benchmarks/prepare.py`, which now detects
+and replaces stale files on its own) and re-establish your own baseline before
+judging whether a change to `train.py` helped. Each result row carries the
+`supersample` factor it was measured at.
 
 ## Current Baseline
 

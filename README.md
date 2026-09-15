@@ -40,7 +40,7 @@ pip install git+https://github.com/matsunagalab/ColabBTR
 import torch
 from scipy.spatial.transform import Rotation
 from colabbtr.morphology import (
-    load_pdb_ca, define_tip, surfing, idilation, ierosion, differentiable_btr,
+    load_pdb_ca, define_tip, afmize_supersampled, ierosion, differentiable_btr,
 )
 
 # 1. Load protein structure (CA atoms) from PDB file
@@ -52,6 +52,13 @@ tip = define_tip(torch.zeros(15, 15), resolution_x=1.0, resolution_y=1.0,
                  probeRadius=2.0, probeAngle=0.3)
 
 # 3. Compute molecular surfaces and simulate AFM images (20 frames)
+#
+# afmize_supersampled builds the surface and the tip on a 5x finer grid, dilates
+# there, and samples the coarse pixel centers last. Doing it the other way round
+# -- surfing() then idilation() on the coarse grid -- point-samples the surface
+# before the tip ever sees it, and every CA bead here (radius 0.225-0.340 nm) is
+# smaller than half the 1 nm pitch, so about a third of the molecular pixels are
+# dropped outright and the peaks come out too low.
 config = {
     "min_x": -15.0, "max_x": 15.0,
     "min_y": -15.0, "max_y": 15.0,
@@ -62,8 +69,10 @@ surfaces, images = [], []
 for _ in range(nframe):
     R = torch.tensor(Rotation.random().as_matrix(), dtype=torch.float32)
     xyz_rot = xyz @ R.T
-    surface = surfing(xyz_rot, radii, config)        # (H, W) molecular surface
-    image = idilation(surface.double(), tip.double()) # (H, W) simulated AFM image
+    image, surface = afmize_supersampled(   # both (H, W) on the coarse grid
+        xyz_rot, radii, config,
+        probe_radius=2.0, probe_angle=0.3, tip_size=15, factor=5,
+    )
     surfaces.append(surface)
     images.append(image)
 surfaces = torch.stack(surfaces)  # (nframe, H, W)
@@ -149,6 +158,28 @@ uv run python tests/visualize.py
 ```
 
 Generates `afmhot`-colored comparison plots (tip shape, surface/image/erosion pipeline, BTR reconstruction) in `tests/`.
+
+## Benchmark
+
+A fixed sweep of 72 conditions (3 PDBs x 2 tip shapes x 4 noise levels x 3 seeds) measuring how accurately BTR recovers a known tip.
+
+```bash
+uv sync --group benchmark
+uv run python benchmarks/prepare.py            # synthesize the data (~5 min)
+uv run python benchmarks/evaluate.py --quick   # one condition, smoke test
+uv run python benchmarks/evaluate.py           # full sweep (~45-60 min on a GPU)
+uv run python benchmarks/report.py             # summary table
+```
+
+`evaluate.py` picks CUDA > MPS > CPU. The sweep is GPU-bound and takes many hours on CPU, so check that the installed torch actually matches your driver before starting it:
+
+```bash
+uv run python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+A `+cuXXX` build newer than the local NVIDIA driver silently falls back to CPU.
+
+Data and results go to `benchmark_results/` (gitignored). Images are rendered with `afmize_supersampled`; `prepare.py` records the supersampling factor in each file and regenerates anything produced by a different renderer, and `evaluate.py` copies that factor into the result JSONL. RMSD values obtained at different factors are not comparable.
 
 ## Notebooks
 

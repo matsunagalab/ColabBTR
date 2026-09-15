@@ -56,6 +56,8 @@ def test_btr_benchmark(pdb_id, noise_type, noise_sigma, tip_cfg, seed,
         "noise_sigma": noise_sigma,
         "seed": seed,
         "nframe": data["config"]["nframe"],
+        # renderer provenance; results across different values are not comparable
+        "supersample": data["config"].get("supersample"),
         "rmsd": round(rmsd, 4),
         "rmsd_cutoff": round(cutoff, 4),
         "final_loss": round(loss[-1], 6),
